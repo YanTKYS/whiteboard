@@ -4,28 +4,28 @@
 <%@ Import Namespace="System.Collections.Generic" %>
 <%@ Import Namespace="System.Security.Cryptography" %>
 <%@ Import Namespace="System.Text" %>
-<%-- AD‘€ì—p‚Ìƒ‰ƒCƒuƒ‰ƒŠ‚ğQÆ --%>
+<%-- ADï¿½ï¿½ï¿½ï¿½pï¿½Ìƒï¿½ï¿½Cï¿½uï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Qï¿½ï¿½ --%>
 <%@ Import Namespace="System.DirectoryServices.AccountManagement" %>
 
 <script runat="server">
     // ==========================================
-    // ƒT[ƒo[ƒTƒCƒhˆ— (C#)
+    // ï¿½Tï¿½[ï¿½oï¿½[ï¿½Tï¿½Cï¿½hï¿½ï¿½ï¿½ï¿½ (C#)
     // ==========================================
     
     private string DataFolderPath { get { return Server.MapPath("./data/"); } }
     
-    // ŠÇ—ÒƒpƒXƒ[ƒh(ƒnƒbƒVƒ…’l): admin9999
+    // ï¿½Ç—ï¿½ï¿½Òƒpï¿½Xï¿½ï¿½ï¿½[ï¿½h(ï¿½nï¿½bï¿½Vï¿½ï¿½ï¿½l): admin9999
     private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272"; 
 
     protected void Page_Load(object sender, EventArgs e)
     {
         Response.Cache.SetCacheability(HttpCacheability.NoCache);
 
-        // Windows”FØƒ`ƒFƒbƒN
+        // Windowsï¿½Fï¿½Øƒ`ï¿½Fï¿½bï¿½N
         if (!User.Identity.IsAuthenticated)
         {
             Response.StatusCode = 401;
-            Response.Write("Windows”FØ‚ª–³Œø‚Å‚·BIIS‚Ìİ’è‚ğŠm”F‚µ‚Ä‚­‚¾‚³‚¢B");
+            Response.Write("Windowsï¿½Fï¿½Ø‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å‚ï¿½ï¿½BIISï¿½Ìİ’ï¿½ï¿½ï¿½mï¿½Fï¿½ï¿½ï¿½Ä‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B");
             Response.End();
             return;
         }
@@ -37,26 +37,25 @@
         else if (action == "delete") DeleteNote();
     }
 
-    // AD‚©‚ç•\¦–¼‚ğæ“¾‚·‚éŠÖ”
+    // ADï¿½ï¿½ï¿½ï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ“¾ï¿½ï¿½ï¿½ï¿½Öï¿½
     private string GetAdDisplayName(string domainUser)
     {
         try
         {
-            // domain\user ‚ğ•ªŠ„
+            // domain\user ï¿½ğ•ªŠï¿½
             string[] parts = domainUser.Split('\\');
-            if (parts.Length != 2) return domainUser; // Œ`®‚ªˆá‚¤ê‡‚Í‚»‚Ì‚Ü‚Ü•Ô‚·
+            if (parts.Length != 2) return domainUser; // ï¿½`ï¿½ï¿½ï¿½ï¿½ï¿½á‚¤ï¿½ê‡ï¿½Í‚ï¿½ï¿½Ì‚Ü‚Ü•Ô‚ï¿½
 
-            string domain = parts[0];
             string username = parts[1];
 
-            // ADƒRƒ“ƒeƒLƒXƒg‚ğì¬iŒ»İ‚ÌƒhƒƒCƒ“j
+            // ADï¿½Rï¿½ï¿½ï¿½eï¿½Lï¿½Xï¿½gï¿½ï¿½ï¿½ì¬ï¿½iï¿½ï¿½ï¿½İ‚Ìƒhï¿½ï¿½ï¿½Cï¿½ï¿½ï¿½j
             using (PrincipalContext ctx = new PrincipalContext(ContextType.Domain))
             {
-                // ƒ†[ƒU[‚ğŒŸõ
+                // ï¿½ï¿½ï¿½[ï¿½Uï¿½[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
                 UserPrincipal user = UserPrincipal.FindByIdentity(ctx, username);
                 if (user != null)
                 {
-                    // •\¦–¼‚ª‚ ‚ê‚Îu“c’†‘¾˜Y(taro)vŒ`®‚É‚µ‚Ä•Ô‚·
+                    // ï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îuï¿½cï¿½ï¿½ï¿½ï¿½ï¿½Y(taro)ï¿½vï¿½`ï¿½ï¿½ï¿½É‚ï¿½ï¿½Ä•Ô‚ï¿½
                     if (!string.IsNullOrEmpty(user.DisplayName))
                     {
                         //return user.DisplayName + "(" + username + ")";
@@ -67,12 +66,12 @@
         }
         catch 
         {
-            // ADÚ‘±ƒGƒ‰[“™‚Ìê‡‚ÍAID‚ğ‚»‚Ì‚Ü‚Ü•Ô‚·
+            // ADï¿½Ú‘ï¿½ï¿½Gï¿½ï¿½ï¿½[ï¿½ï¿½ï¿½Ìê‡ï¿½ÍAIDï¿½ï¿½ï¿½ï¿½ï¿½Ì‚Ü‚Ü•Ô‚ï¿½
         }
-        return domainUser; // æ“¾‚Å‚«‚È‚©‚Á‚½ê‡‚ÍŒ³‚ÌID‚ğ•Ô‚·
+        return domainUser; // ï¿½æ“¾ï¿½Å‚ï¿½ï¿½È‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ê‡ï¿½ÍŒï¿½ï¿½ï¿½IDï¿½ï¿½Ô‚ï¿½
     }
 
-    // SHA256ƒnƒbƒVƒ…
+    // SHA256ï¿½nï¿½bï¿½Vï¿½ï¿½
     private string ComputeSha256Hash(string rawData)
     {
         using (SHA256 sha256Hash = SHA256.Create())
@@ -84,7 +83,7 @@
         }
     }
 
-    // 1. ƒm[ƒg‚Ì•Û‘¶ˆ—
+    // 1. ï¿½mï¿½[ï¿½gï¿½Ì•Û‘ï¿½ï¿½ï¿½ï¿½ï¿½
     private void SaveNote()
     {
         try
@@ -92,14 +91,20 @@
             string title = Request["title"];
             string body = Request["body"];
             string color = Request["color"];
+            if (Array.IndexOf(new[] { "yellow", "blue", "red", "green" }, color) < 0) color = "yellow";
             
-            // ƒVƒXƒeƒ€ã‚ÌID (—á: DOMAIN\taro)
+            // ï¿½Vï¿½Xï¿½eï¿½ï¿½ï¿½ï¿½ï¿½ID (ï¿½ï¿½: DOMAIN\taro)
             string currentUserId = User.Identity.Name;
             
-            // AD‚©‚ç•\¦–¼‚ğæ“¾ (—á: “c’†‘¾˜Y(taro))
-            string displayName = GetAdDisplayName(currentUserId);
+            // ADï¿½ï¿½ï¿½ï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ“¾ (ï¿½ï¿½: ï¿½cï¿½ï¿½ï¿½ï¿½ï¿½Y(taro))
+            if (string.IsNullOrEmpty(title) || string.IsNullOrEmpty(body))
+            {
+                Response.Write("{\"status\":\"error\",\"message\":\"title and body are required.\"}");
+                Response.End();
+                return;
+            }
 
-            if (string.IsNullOrEmpty(title) || string.IsNullOrEmpty(body)) return;
+            string displayName = GetAdDisplayName(currentUserId);
 
             title = HttpUtility.HtmlEncode(title);
             body = HttpUtility.HtmlEncode(body).Replace("\n", "<br>");
@@ -113,8 +118,8 @@
                 title = title,
                 body = body,
                 color = color,
-                author_id = currentUserId, // íœ”»’è—piŒµ–§‚ÈIDj
-                author_name = displayName, // •\¦—piAD•\¦–¼j
+                author_id = currentUserId, // ï¿½íœï¿½ï¿½ï¿½ï¿½pï¿½iï¿½ï¿½ï¿½ï¿½ï¿½ï¿½IDï¿½j
+                author_name = displayName, // ï¿½\ï¿½ï¿½ï¿½pï¿½iADï¿½\ï¿½ï¿½ï¿½ï¿½ï¿½j
                 post_date = DateTime.Now.ToString("yyyy/MM/dd HH:mm"),
                 expire_disp = expireDate.ToString("MM/dd")
             };
@@ -131,12 +136,12 @@
         catch (Exception ex)
         {
             Response.StatusCode = 500;
-            Response.Write("{\"status\":\"error\", \"message\":\"" + ex.Message + "\"}");
+            Response.Write(new JavaScriptSerializer().Serialize(new { status = "error", message = ex.Message }));
         }
         Response.End();
     }
 
-    // 2. ƒm[ƒgæ“¾
+    // 2. ï¿½mï¿½[ï¿½gï¿½æ“¾
     private void GetNotesAndCleanup()
     {
         List<object> notes = new List<object>();
@@ -171,15 +176,16 @@
                 string content = File.ReadAllText(file);
                 var noteObj = serializer.Deserialize<Dictionary<string, string>>(content);
                 
-                // ŒİŠ·«ˆÛ: ŒÃ‚¢ƒf[ƒ^‚È‚Ç‚Å author_id ‚ª‚È‚¢ê‡‚Í author ‚ğŒ©‚é
+                // ï¿½İŠï¿½ï¿½ï¿½ï¿½Ûï¿½: ï¿½Ã‚ï¿½ï¿½fï¿½[ï¿½^ï¿½È‚Ç‚ï¿½ author_id ï¿½ï¿½ï¿½È‚ï¿½ï¿½ê‡ï¿½ï¿½ author ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
                 string authorId = noteObj.ContainsKey("author_id") ? noteObj["author_id"] : (noteObj.ContainsKey("author") ? noteObj["author"] : "");
                 
-                // •\¦–¼: author_name ‚ª‚ ‚ê‚Î‚»‚ê‚ğg‚¤B‚È‚¯‚ê‚ÎID
+                // ï¿½\ï¿½ï¿½ï¿½ï¿½: author_name ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î‚ï¿½ï¿½ï¿½ï¿½ï¿½gï¿½ï¿½ï¿½Bï¿½È‚ï¿½ï¿½ï¿½ï¿½ID
                 string authorName = noteObj.ContainsKey("author_name") ? noteObj["author_name"] : authorId;
-                // ƒhƒƒCƒ“–¼(DOMAIN\)‚ªc‚Á‚Ä‚¢‚½‚çí‚éiŒ©‰h‚¦’²®j
-                authorName = authorName.Replace(authorId.Split('\\')[0] + "\\", ""); 
+                // ï¿½hï¿½ï¿½ï¿½Cï¿½ï¿½ï¿½ï¿½(DOMAIN\)ï¿½ï¿½ï¿½cï¿½ï¿½ï¿½Ä‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½iï¿½ï¿½ï¿½hï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½j
+                int bsIdx = authorName.LastIndexOf('\\');
+                if (bsIdx >= 0) authorName = authorName.Substring(bsIdx + 1);
 
-                // ©•ª‚©‚Ç‚¤‚©”»’è
+                // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
                 bool isMine = authorId.Equals(currentUserId, StringComparison.OrdinalIgnoreCase);
                 
                 var responseObj = new {
@@ -189,7 +195,7 @@
                     color = noteObj["color"],
                     post_date = noteObj["post_date"],
                     expire_disp = noteObj["expire_disp"],
-                    author_disp = authorName, // ®Œ`Ï‚İ‚Ì–¼‘O
+                    author_disp = authorName, // ï¿½ï¿½ï¿½`ï¿½Ï‚İ‚Ì–ï¿½ï¿½O
                     is_mine = isMine 
                 };
                 
@@ -203,14 +209,23 @@
         Response.End();
     }
 
-    // 3. íœˆ—
+    // 3. ï¿½íœï¿½ï¿½ï¿½ï¿½
     private void DeleteNote()
     {
         string targetId = Request["id"];
         string adminPass = Request["admin_pass"]; 
         string currentUserId = User.Identity.Name;
 
-        string filePath = Path.Combine(DataFolderPath, targetId);
+        // ãƒ‘ã‚¹ãƒˆãƒ©ãƒãƒ¼ã‚µãƒ«å¯¾ç­–: Path.GetFileName ã§ãƒ‡ã‚£ãƒ¬ã‚¯ãƒˆãƒªæˆåˆ†ã‚’é™¤å»ã—ã€å…ƒã®å€¤ã¨ä¸€è‡´ã™ã‚‹ã‹ç¢ºèª
+        string safeId = Path.GetFileName(targetId ?? "");
+        if (safeId != targetId || !safeId.EndsWith(".json") || safeId.Length < 10)
+        {
+            Response.Write("{\"status\":\"error\",\"message\":\"Invalid ID.\"}");
+            Response.End();
+            return;
+        }
+
+        string filePath = Path.Combine(DataFolderPath, safeId);
 
         if (File.Exists(filePath))
         {
@@ -222,10 +237,10 @@
                 
                 string authorId = noteObj.ContainsKey("author_id") ? noteObj["author_id"] : (noteObj.ContainsKey("author") ? noteObj["author"] : "");
 
-                // –{lŠm”F (ID“¯m‚Å”äŠr)
+                // ï¿½{ï¿½lï¿½mï¿½F (IDï¿½ï¿½ï¿½mï¿½Å”ï¿½r)
                 bool isMine = authorId.Equals(currentUserId, StringComparison.OrdinalIgnoreCase);
 
-                // ŠÇ—ÒƒpƒXƒ[ƒhŠm”F
+                // ï¿½Ç—ï¿½ï¿½Òƒpï¿½Xï¿½ï¿½ï¿½[ï¿½hï¿½mï¿½F
                 bool isAdmin = (!string.IsNullOrEmpty(adminPass) && ComputeSha256Hash(adminPass) == MASTER_PASS_HASH);
 
                 if (isMine || isAdmin)
@@ -235,17 +250,17 @@
                 }
                 else
                 {
-                    Response.Write("{\"status\":\"error\", \"message\":\"Œ ŒÀ‚ª‚ ‚è‚Ü‚¹‚ñB\"}");
+                    Response.Write("{\"status\":\"error\", \"message\":\"ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü‚ï¿½ï¿½ï¿½B\"}");
                 }
             }
             catch
             {
-                Response.Write("{\"status\":\"error\", \"message\":\"íœˆ—‚É¸”s‚µ‚Ü‚µ‚½\"}");
+                Response.Write("{\"status\":\"error\", \"message\":\"ï¿½íœï¿½ï¿½ï¿½ï¿½ï¿½Éï¿½ï¿½sï¿½ï¿½ï¿½Ü‚ï¿½ï¿½ï¿½\"}");
             }
         }
         else
         {
-            Response.Write("{\"status\":\"error\", \"message\":\"Šù‚Éíœ‚³‚ê‚Ä‚¢‚Ü‚·\"}");
+            Response.Write("{\"status\":\"error\", \"message\":\"ï¿½ï¿½ï¿½Éíœï¿½ï¿½ï¿½ï¿½Ä‚ï¿½ï¿½Ü‚ï¿½\"}");
         }
         Response.End();
     }
@@ -256,10 +271,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>‚Ù‚í‚¢‚Æ‚Ú[‚Ç - “`Œ¾”Â</title>
+<title>ï¿½Ù‚í‚¢ï¿½Æ‚Ú[ï¿½ï¿½ - ï¿½`ï¿½ï¿½ï¿½ï¿½</title>
 <script src="./common/jquery-3.6.0.min.js"></script>
 <style>
-    /* CSS‚Í‘O‰ñ‚Æ“¯‚¶ */
+    /* CSSï¿½Í‘Oï¿½ï¿½Æ“ï¿½ï¿½ï¿½ */
     body { font-family: "Meiryo UI", sans-serif; background-color: #f4f7f6; margin: 0; color: #333; }
     header { background-color: #0056b3; color: white; padding: 15px 25px; display: flex; align-items: baseline; box-shadow: 0 2px 5px rgba(0,0,0,0.15); }
     .logo-main { font-size: 1.8rem; font-weight: bold; margin-right: 15px; }
@@ -272,7 +287,7 @@
     .note.red    { background-color: #ffebee; border-top: 4px solid #ef5350; }
     .note.green  { background-color: #e8f5e9; border-top: 4px solid #66bb6a; }
     .note-meta { display: flex; justify-content: space-between; font-size: 0.75rem; color: #888; margin-bottom: 8px; border-bottom: 1px dashed #ccc; padding-bottom: 4px; }
-    .note-author { font-size: 0.8rem; color: #0056b3; text-align: right; margin-top: auto; font-weight: bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } /* –¼‘O‚ª’·‚¢ê‡‚Ì‘Îô */
+    .note-author { font-size: 0.8rem; color: #0056b3; text-align: right; margin-top: auto; font-weight: bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } /* ï¿½ï¿½ï¿½Oï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ê‡ï¿½Ì‘Îï¿½ */
     .note-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 10px; overflow: hidden; max-height: 3em; line-height: 1.4; }
     .note-body { flex-grow: 1; font-size: 0.95rem; overflow-y: auto; line-height: 1.6; white-space: pre-wrap; word-break: break-all; margin-bottom: 5px; }
     .btn-delete-mine { position: absolute; top: 5px; right: 5px; width: 24px; height: 24px; line-height: 24px; text-align: center; color: #999; cursor: pointer; font-weight: bold; font-size: 16px; background: rgba(255,255,255,0.8); border-radius: 50%; }
@@ -296,48 +311,48 @@
 <body>
 
     <header>
-        <div class="logo-main">‚Ù‚í‚¢‚Æ‚Ú[‚Ç</div>
-        <div class="logo-sub">“`Œ¾”Â</div>
+        <div class="logo-main">ï¿½Ù‚í‚¢ï¿½Æ‚Ú[ï¿½ï¿½</div>
+        <div class="logo-sub">ï¿½`ï¿½ï¿½ï¿½ï¿½</div>
     </header>
 
     <div id="board"></div>
-    <div id="fab-add" title="ƒƒ‚‚ğ“\‚é">{</div>
-    <div id="admin-mode-toggle" title="ŠÇ—Òíœ">Admin</div>
+    <div id="fab-add" title="ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½\ï¿½ï¿½">ï¿½{</div>
+    <div id="admin-mode-toggle" title="ï¿½Ç—ï¿½ï¿½Òíœ">Admin</div>
 
     <div id="modal-post" class="modal-overlay">
         <div class="modal-content">
-            <h3 style="margin-top:0;">V‹K“\‚è•t‚¯</h3>
+            <h3 style="margin-top:0;">ï¿½Vï¿½Kï¿½\ï¿½ï¿½tï¿½ï¿½</h3>
             <p style="font-size:0.85rem; color:#d32f2f; background:#ffebee; padding:5px; border-radius:4px;">
-                ¦‚ ‚È‚½‚Ì–¼‚Å“Še‚³‚ê‚Ü‚·B<br>
-                ¦“Še‚Í7“úŒã‚É©“®“I‚Éíœ‚³‚ê‚Ü‚·B
+                ï¿½ï¿½ï¿½ï¿½ï¿½È‚ï¿½ï¿½Ìï¿½ï¿½ï¿½ï¿½Å“ï¿½ï¿½eï¿½ï¿½ï¿½ï¿½Ü‚ï¿½ï¿½B<br>
+                ï¿½ï¿½ï¿½ï¿½ï¿½eï¿½ï¿½7ï¿½ï¿½ï¿½ï¿½Éï¿½ï¿½ï¿½ï¿½Iï¿½Éíœï¿½ï¿½ï¿½ï¿½Ü‚ï¿½ï¿½B
             </p>
-            <div class="form-group"><label>Œ–¼</label><input type="text" id="input-title" placeholder="—áF”N––’²®‘—Ş‚Ì’ño‚É‚Â‚¢‚Ä"></div>
-            <div class="form-group"><label>“à—e</label><textarea id="input-body" placeholder="“à—e‚ğ“ü—Í‚µ‚Ä‚­‚¾‚³‚¢..."></textarea></div>
+            <div class="form-group"><label>ï¿½ï¿½ï¿½ï¿½</label><input type="text" id="input-title" placeholder="ï¿½ï¿½Fï¿½Nï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ş‚Ì’ï¿½oï¿½É‚Â‚ï¿½ï¿½ï¿½"></div>
+            <div class="form-group"><label>ï¿½ï¿½ï¿½e</label><textarea id="input-body" placeholder="ï¿½ï¿½ï¿½eï¿½ï¿½ï¿½ï¿½Í‚ï¿½ï¿½Ä‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½..."></textarea></div>
             <div class="form-group">
-                <label>•tâ³‚ÌF</label>
+                <label>ï¿½tâ³‚ÌF</label>
                 <select id="input-color">
-                    <option value="yellow">‰©Fiˆê”Êj</option>
-                    <option value="blue">ÂFi’Ê’mEü’mj</option>
-                    <option value="red">ÔFid—vE‹Ù‹}j</option>
-                    <option value="green">—ÎFiƒCƒxƒ“ƒgE‚»‚Ì‘¼j</option>
+                    <option value="yellow">ï¿½ï¿½ï¿½Fï¿½iï¿½ï¿½Êj</option>
+                    <option value="blue">ï¿½ÂFï¿½iï¿½Ê’mï¿½Eï¿½ï¿½ï¿½mï¿½j</option>
+                    <option value="red">ï¿½ÔFï¿½iï¿½dï¿½vï¿½Eï¿½Ù‹}ï¿½j</option>
+                    <option value="green">ï¿½ÎFï¿½iï¿½Cï¿½xï¿½ï¿½ï¿½gï¿½Eï¿½ï¿½ï¿½Ì‘ï¿½ï¿½j</option>
                 </select>
             </div>
             <div class="btn-area">
-                <button class="btn-cancel" onclick="$('#modal-post').hide()">ƒLƒƒƒ“ƒZƒ‹</button>
-                <button class="btn-submit" id="btn-save">“\‚é</button>
+                <button class="btn-cancel" onclick="$('#modal-post').hide()">ï¿½Lï¿½ï¿½ï¿½ï¿½ï¿½Zï¿½ï¿½</button>
+                <button class="btn-submit" id="btn-save">ï¿½\ï¿½ï¿½</button>
             </div>
         </div>
     </div>
 
     <div id="modal-admin-delete" class="modal-overlay">
         <div class="modal-content" style="max-width: 400px;">
-            <h3 style="margin-top:0;">ŠÇ—Ò‹­§íœ</h3>
-            <p>ŠÇ—ÒƒpƒXƒ[ƒh‚ğ“ü—Í‚µ‚Ä‚­‚¾‚³‚¢B</p>
+            <h3 style="margin-top:0;">ï¿½Ç—ï¿½ï¿½Ò‹ï¿½ï¿½ï¿½ï¿½íœ</h3>
+            <p>ï¿½Ç—ï¿½ï¿½Òƒpï¿½Xï¿½ï¿½ï¿½[ï¿½hï¿½ï¿½ï¿½ï¿½Í‚ï¿½ï¿½Ä‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B</p>
             <input type="hidden" id="admin-target-id">
-            <div class="form-group"><input type="password" id="admin-pass" placeholder="ƒpƒXƒ[ƒh"></div>
+            <div class="form-group"><input type="password" id="admin-pass" placeholder="ï¿½pï¿½Xï¿½ï¿½ï¿½[ï¿½h"></div>
             <div class="btn-area">
-                <button class="btn-cancel" onclick="$('#modal-admin-delete').hide()">ƒLƒƒƒ“ƒZƒ‹</button>
-                <button class="btn-danger" id="btn-exec-admin-delete">íœÀs</button>
+                <button class="btn-cancel" onclick="$('#modal-admin-delete').hide()">ï¿½Lï¿½ï¿½ï¿½ï¿½ï¿½Zï¿½ï¿½</button>
+                <button class="btn-danger" id="btn-exec-admin-delete">ï¿½íœï¿½ï¿½ï¿½s</button>
             </div>
         </div>
     </div>
@@ -353,19 +368,19 @@
 
         $('#btn-save').on('click', function() {
             var title = $('#input-title').val(), body = $('#input-body').val(), color = $('#input-color').val();
-            if(!title || !body) { alert('Œ–¼‚Æ“à—e‚Í•K{‚Å‚·B'); return; }
-            var $btn = $(this); $btn.prop('disabled', true).text('•Û‘¶’†...');
+            if(!title || !body) { alert('ï¿½ï¿½ï¿½ï¿½ï¿½Æ“ï¿½ï¿½eï¿½Í•Kï¿½{ï¿½Å‚ï¿½ï¿½B'); return; }
+            var $btn = $(this); $btn.prop('disabled', true).text('ï¿½Û‘ï¿½ï¿½ï¿½...');
             
             $.post('Default.aspx?action=save', { title: title, body: body, color: color }, function() {
                 $('#modal-post').hide(); loadNotes();
             }).fail(function(xhr){
-                alert('ƒGƒ‰[‚ª”­¶‚µ‚Ü‚µ‚½B\n' + xhr.responseText);
-            }).always(function(){ $btn.prop('disabled', false).text('“\‚é'); });
+                alert('ï¿½Gï¿½ï¿½ï¿½[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü‚ï¿½ï¿½ï¿½ï¿½B\n' + xhr.responseText);
+            }).always(function(){ $btn.prop('disabled', false).text('ï¿½\ï¿½ï¿½'); });
         });
 
         $(document).on('click', '.btn-delete-mine', function() {
             var id = $(this).data('id');
-            if(confirm('‚±‚Ì“Še‚ğíœ‚µ‚Ü‚·‚©H')) {
+            if(confirm('ï¿½ï¿½ï¿½Ì“ï¿½ï¿½eï¿½ï¿½ï¿½íœï¿½ï¿½ï¿½Ü‚ï¿½ï¿½ï¿½ï¿½H')) {
                 $.post('Default.aspx?action=delete', { id: id }, function(res) {
                     var data = (typeof res === 'string') ? JSON.parse(res) : res;
                     if(data.status === 'success') { loadNotes(); }
@@ -377,8 +392,8 @@
         var adminMode = false;
         $('#admin-mode-toggle').on('click', function() {
             adminMode = !adminMode;
-            if(adminMode) { alert('ŠÇ—Òíœƒ‚[ƒhFON'); $('.note').css('cursor', 'crosshair'); }
-            else { alert('ŠÇ—Òíœƒ‚[ƒhFOFF'); $('.note').css('cursor', 'default'); }
+            if(adminMode) { alert('ï¿½Ç—ï¿½ï¿½Òíœï¿½ï¿½ï¿½[ï¿½hï¿½FON'); $('.note').css('cursor', 'crosshair'); }
+            else { alert('ï¿½Ç—ï¿½ï¿½Òíœï¿½ï¿½ï¿½[ï¿½hï¿½FOFF'); $('.note').css('cursor', 'default'); }
         });
 
         $(document).on('click', '.note', function() {
@@ -403,15 +418,15 @@
         function loadNotes() {
             $.getJSON('Default.aspx?action=load', function(data) {
                 var $board = $('#board'); $board.empty();
-                if(data.length === 0) { $board.html('<p style="color:#777; margin:20px; text-align:center; width:100%;">Œ»İAŒf¦‚³‚ê‚Ä‚¢‚éî•ñ‚Í‚ ‚è‚Ü‚¹‚ñB</p>'); return; }
+                if(data.length === 0) { $board.html('<p style="color:#777; margin:20px; text-align:center; width:100%;">ï¿½ï¿½ï¿½İAï¿½fï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä‚ï¿½ï¿½ï¿½ï¿½ï¿½Í‚ï¿½ï¿½ï¿½Ü‚ï¿½ï¿½ï¿½B</p>'); return; }
                 
                 data.sort(function(a, b) { return (a.post_date < b.post_date) ? 1 : -1; });
                 $.each(data, function(i, item) {
-                    var deleteBtn = item.is_mine ? `<div class="btn-delete-mine" data-id="${item.id}" title="íœ">~</div>` : '';
+                    var deleteBtn = item.is_mine ? `<div class="btn-delete-mine" data-id="${item.id}" title="ï¿½íœ">ï¿½~</div>` : '';
                     var html = `
                         <div class="note ${item.color}" data-id="${item.id}">
                             ${deleteBtn}
-                            <div class="note-meta"><span>${item.post_date}</span><span>(`${item.expire_disp})</span></div>
+                            <div class="note-meta"><span>${item.post_date}</span><span>(ï¿½`${item.expire_disp})</span></div>
                             <div class="note-title" title="${item.title}">${item.title}</div>
                             <div class="note-body">${item.body}</div>
                             <div class="note-author">by ${item.author_disp}</div>
