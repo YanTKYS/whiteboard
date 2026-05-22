@@ -13,9 +13,39 @@
     // ==========================================
     
     private string DataFolderPath { get { return Server.MapPath("./data/"); } }
+    private string LogFolderPath  { get { return Server.MapPath("./logs/"); } }
     
     // �Ǘ��҃p�X���[�h(�n�b�V���l): admin9999
-    private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272"; 
+    private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272";
+
+    // HTTP 直接アクセスを禁止した保護フォルダを作成する
+    private void EnsureProtectedFolder(string folderPath)
+    {
+        if (!Directory.Exists(folderPath))
+        {
+            Directory.CreateDirectory(folderPath);
+            File.WriteAllText(
+                Path.Combine(folderPath, "web.config"),
+                "<?xml version=\"1.0\"?><configuration><system.webServer><handlers><clear /></handlers></system.webServer></configuration>"
+            );
+        }
+    }
+
+    private void EnsureDataFolder() { EnsureProtectedFolder(DataFolderPath); }
+
+    private static readonly object _logLock = new object();
+    private void LogError(string source, Exception ex)
+    {
+        try
+        {
+            EnsureProtectedFolder(LogFolderPath);
+            string logFile = Path.Combine(LogFolderPath, DateTime.Now.ToString("yyyyMM") + ".log");
+            string entry = string.Format("[{0}] [{1}] {2}: {3}\r\n",
+                DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"), User.Identity.Name, source, ex.Message);
+            lock (_logLock) { File.AppendAllText(logFile, entry, Encoding.UTF8); }
+        }
+        catch { }
+    }
 
     protected void Page_Load(object sender, EventArgs e)
     {
@@ -40,6 +70,10 @@
     // AD����\�������擾����֐�
     private string GetAdDisplayName(string domainUser)
     {
+        string cacheKey = "adname_" + domainUser.ToLowerInvariant();
+        string cached = HttpRuntime.Cache[cacheKey] as string;
+        if (cached != null) return cached;
+
         try
         {
             // domain\user �𕪊�
@@ -59,13 +93,16 @@
                     if (!string.IsNullOrEmpty(user.DisplayName))
                     {
                         //return user.DisplayName + "(" + username + ")";
+                        HttpRuntime.Cache.Insert(cacheKey, user.DisplayName, null,
+                            DateTime.Now.AddMinutes(60), System.Web.Caching.Cache.NoSlidingExpiration);
                         return user.DisplayName;
                     }
                 }
             }
         }
-        catch 
+        catch (Exception ex)
         {
+            LogError("GetAdDisplayName", ex);
             // AD�ڑ��G���[���̏ꍇ�́AID�����̂܂ܕԂ�
         }
         return domainUser; // �擾�ł��Ȃ������ꍇ�͌���ID��Ԃ�
@@ -127,7 +164,7 @@
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             string jsonContent = serializer.Serialize(noteData);
             
-            if (!Directory.Exists(DataFolderPath)) Directory.CreateDirectory(DataFolderPath);
+            EnsureDataFolder();
             File.WriteAllText(Path.Combine(DataFolderPath, fileName), jsonContent);
 
             Response.ContentType = "application/json";
@@ -135,6 +172,7 @@
         }
         catch (Exception ex)
         {
+            LogError("SaveNote", ex);
             Response.StatusCode = 500;
             Response.Write(new JavaScriptSerializer().Serialize(new { status = "error", message = ex.Message }));
         }
@@ -201,7 +239,7 @@
                 
                 notes.Add(responseObj);
             }
-            catch { }
+            catch (Exception ex) { LogError("GetNotesAndCleanup", ex); }
         }
 
         Response.ContentType = "application/json";
@@ -253,8 +291,9 @@
                     Response.Write("{\"status\":\"error\", \"message\":\"����������܂���B\"}");
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                LogError("DeleteNote", ex);
                 Response.Write("{\"status\":\"error\", \"message\":\"�폜�����Ɏ��s���܂���\"}");
             }
         }
