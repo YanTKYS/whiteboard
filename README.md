@@ -67,6 +67,22 @@ whiteboard/
 > `data/` フォルダはアプリが初回アクセス時に自動作成します。  
 > IIS の実行アカウント（アプリプールのユーザー）に `data/` フォルダへの **書き込み権限** が必要です。
 
+> [!WARNING]
+> **`default.aspx` は配置前に Shift-JIS へ変換してください。**  
+> 本リポジトリのファイルは UTF-8 で管理していますが、IIS（ASP.NET）は ASPX ファイルを
+> Shift-JIS（CP932）として解釈するため、UTF-8 のまま配置するとコンパイルエラーが発生します。
+>
+> 変換例（PowerShell）:
+> ```powershell
+> $content = [System.IO.File]::ReadAllText("default.aspx", [System.Text.Encoding]::UTF8)
+> [System.IO.File]::WriteAllText("default.aspx", $content, [System.Text.Encoding]::GetEncoding("shift_jis"))
+> ```
+>
+> 変換例（iconv / Linux・Mac）:
+> ```bash
+> iconv -f UTF-8 -t SHIFT_JIS default.aspx > default_sjis.aspx
+> ```
+
 ### 2. IIS の認証設定
 
 IIS マネージャーで対象サイト／アプリに対して以下を設定します。
@@ -163,6 +179,7 @@ $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
 
 ## 注意事項
 
+- **`default.aspx` は IIS 配置前に Shift-JIS へ変換すること。** リポジトリは UTF-8 で管理しているが、IIS（ASP.NET）は Shift-JIS を要求するためコンパイルエラーになる（「セットアップ手順 1」参照）。
 - `web.config` の `debug="true"` は開発・検証時のみ使用し、**本番運用時は `false`** に変更してください。
 - `customErrors mode="Off"` はエラー詳細がブラウザに表示されます。本番では `RemoteOnly` または `On` を推奨します。
 - 本システムは閉域ネットワーク内での利用を想定しています。インターネット公開環境での使用は想定外です。
