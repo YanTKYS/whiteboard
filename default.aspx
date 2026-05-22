@@ -4,21 +4,21 @@
 <%@ Import Namespace="System.Collections.Generic" %>
 <%@ Import Namespace="System.Security.Cryptography" %>
 <%@ Import Namespace="System.Text" %>
-<%-- AD����p�̃��C�u�������Q�� --%>
+<%-- Import AD library --%>
 <%@ Import Namespace="System.DirectoryServices.AccountManagement" %>
 
 <script runat="server">
     // ==========================================
-    // �T�[�o�[�T�C�h���� (C#)
+    // Server-side code (C#)
     // ==========================================
-    
+
     private string DataFolderPath { get { return Server.MapPath("./data/"); } }
     private string LogFolderPath  { get { return Server.MapPath("./logs/"); } }
-    
-    // �Ǘ��҃p�X���[�h(�n�b�V���l): admin9999
+
+    // Admin password hash (plain: admin9999)
     private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272";
 
-    // HTTP 直接アクセスを禁止した保護フォルダを作成する
+    // Create a folder and place a web.config that blocks direct HTTP access
     private void EnsureProtectedFolder(string folderPath)
     {
         if (!Directory.Exists(folderPath))
@@ -51,23 +51,23 @@
     {
         Response.Cache.SetCacheability(HttpCacheability.NoCache);
 
-        // Windows�F�؃`�F�b�N
+        // Reject unauthenticated requests
         if (!User.Identity.IsAuthenticated)
         {
             Response.StatusCode = 401;
-            Response.Write("Windows�F�؂������ł��BIIS�̐ݒ���m�F���Ă��������B");
+            Response.Write("Windows認証が必要です。IISの設定を確認してください。");
             Response.End();
             return;
         }
 
         string action = Request["action"];
-        
+
         if (action == "save") SaveNote();
         else if (action == "load") GetNotesAndCleanup();
         else if (action == "delete") DeleteNote();
     }
 
-    // AD����\�������擾����֐�
+    // Resolve AD display name; result is cached per user for 60 min
     private string GetAdDisplayName(string domainUser)
     {
         string cacheKey = "adname_" + domainUser.ToLowerInvariant();
@@ -76,39 +76,31 @@
 
         try
         {
-            // domain\user �𕪊�
             string[] parts = domainUser.Split('\\');
-            if (parts.Length != 2) return domainUser; // �`�����Ⴄ�ꍇ�͂��̂܂ܕԂ�
+            if (parts.Length != 2) return domainUser;
 
             string username = parts[1];
 
-            // AD�R���e�L�X�g���쐬�i���݂̃h���C���j
             using (PrincipalContext ctx = new PrincipalContext(ContextType.Domain))
             {
-                // ���[�U�[������
                 UserPrincipal user = UserPrincipal.FindByIdentity(ctx, username);
-                if (user != null)
+                if (user != null && !string.IsNullOrEmpty(user.DisplayName))
                 {
-                    // �\����������΁u�c�����Y(taro)�v�`���ɂ��ĕԂ�
-                    if (!string.IsNullOrEmpty(user.DisplayName))
-                    {
-                        //return user.DisplayName + "(" + username + ")";
-                        HttpRuntime.Cache.Insert(cacheKey, user.DisplayName, null,
-                            DateTime.Now.AddMinutes(60), System.Web.Caching.Cache.NoSlidingExpiration);
-                        return user.DisplayName;
-                    }
+                    //return user.DisplayName + "(" + username + ")";
+                    HttpRuntime.Cache.Insert(cacheKey, user.DisplayName, null,
+                        DateTime.Now.AddMinutes(60), System.Web.Caching.Cache.NoSlidingExpiration);
+                    return user.DisplayName;
                 }
             }
         }
         catch (Exception ex)
         {
             LogError("GetAdDisplayName", ex);
-            // AD�ڑ��G���[���̏ꍇ�́AID�����̂܂ܕԂ�
         }
-        return domainUser; // �擾�ł��Ȃ������ꍇ�͌���ID��Ԃ�
+        return domainUser;
     }
 
-    // SHA256�n�b�V��
+    // SHA-256 hash helper
     private string ComputeSha256Hash(string rawData)
     {
         using (SHA256 sha256Hash = SHA256.Create())
@@ -120,7 +112,7 @@
         }
     }
 
-    // 1. �m�[�g�̕ۑ�����
+    // 1. Save note
     private void SaveNote()
     {
         try
@@ -129,11 +121,9 @@
             string body = Request["body"];
             string color = Request["color"];
             if (Array.IndexOf(new[] { "yellow", "blue", "red", "green" }, color) < 0) color = "yellow";
-            
-            // �V�X�e�����ID (��: DOMAIN\taro)
+
             string currentUserId = User.Identity.Name;
-            
-            // AD����\�������擾 (��: �c�����Y(taro))
+
             if (string.IsNullOrEmpty(title) || string.IsNullOrEmpty(body))
             {
                 Response.Write("{\"status\":\"error\",\"message\":\"title and body are required.\"}");
@@ -148,22 +138,22 @@
 
             DateTime expireDate = DateTime.Now.AddDays(7);
             string fileName = expireDate.ToString("yyyyMMdd") + "_" + Guid.NewGuid().ToString() + ".json";
-            
+
             var noteData = new
             {
                 id = fileName,
                 title = title,
                 body = body,
                 color = color,
-                author_id = currentUserId, // �폜����p�i������ID�j
-                author_name = displayName, // �\���p�iAD�\�����j
+                author_id = currentUserId, // used for delete auth
+                author_name = displayName, // used for display
                 post_date = DateTime.Now.ToString("yyyy/MM/dd HH:mm"),
                 expire_disp = expireDate.ToString("MM/dd")
             };
 
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             string jsonContent = serializer.Serialize(noteData);
-            
+
             EnsureDataFolder();
             File.WriteAllText(Path.Combine(DataFolderPath, fileName), jsonContent);
 
@@ -179,14 +169,14 @@
         Response.End();
     }
 
-    // 2. �m�[�g�擾
+    // 2. Load notes and delete expired files on the fly
     private void GetNotesAndCleanup()
     {
         List<object> notes = new List<object>();
         JavaScriptSerializer serializer = new JavaScriptSerializer();
-        string currentUserId = User.Identity.Name; 
-        
-        if (!Directory.Exists(DataFolderPath)) Directory.CreateDirectory(DataFolderPath);
+        string currentUserId = User.Identity.Name;
+
+        EnsureDataFolder();
 
         string[] files = Directory.GetFiles(DataFolderPath, "*.json");
         string todayStr = DateTime.Now.ToString("yyyyMMdd");
@@ -204,7 +194,7 @@
                     if (expireDateInt < todayInt)
                     {
                         try { File.Delete(file); } catch { }
-                        continue; 
+                        continue;
                     }
                 }
             }
@@ -213,19 +203,17 @@
             {
                 string content = File.ReadAllText(file);
                 var noteObj = serializer.Deserialize<Dictionary<string, string>>(content);
-                
-                // �݊����ێ�: �Â��f�[�^�Ȃǂ� author_id ���Ȃ��ꍇ�� author ������
+
+                // Compat: fall back to legacy "author" key if "author_id" is absent
                 string authorId = noteObj.ContainsKey("author_id") ? noteObj["author_id"] : (noteObj.ContainsKey("author") ? noteObj["author"] : "");
-                
-                // �\����: author_name ������΂�����g���B�Ȃ����ID
+
                 string authorName = noteObj.ContainsKey("author_name") ? noteObj["author_name"] : authorId;
-                // �h���C����(DOMAIN\)���c���Ă�������i���h�������j
+                // Strip domain prefix (e.g. DOMAIN\taro -> taro)
                 int bsIdx = authorName.LastIndexOf('\\');
                 if (bsIdx >= 0) authorName = authorName.Substring(bsIdx + 1);
 
-                // �������ǂ�������
                 bool isMine = authorId.Equals(currentUserId, StringComparison.OrdinalIgnoreCase);
-                
+
                 var responseObj = new {
                     id = noteObj["id"],
                     title = noteObj["title"],
@@ -233,10 +221,10 @@
                     color = noteObj["color"],
                     post_date = noteObj["post_date"],
                     expire_disp = noteObj["expire_disp"],
-                    author_disp = authorName, // ���`�ς݂̖��O
-                    is_mine = isMine 
+                    author_disp = authorName,
+                    is_mine = isMine
                 };
-                
+
                 notes.Add(responseObj);
             }
             catch (Exception ex) { LogError("GetNotesAndCleanup", ex); }
@@ -247,14 +235,14 @@
         Response.End();
     }
 
-    // 3. �폜����
+    // 3. Delete note
     private void DeleteNote()
     {
         string targetId = Request["id"];
-        string adminPass = Request["admin_pass"]; 
+        string adminPass = Request["admin_pass"];
         string currentUserId = User.Identity.Name;
 
-        // パストラバーサル対策: Path.GetFileName でディレクトリ成分を除去し、元の値と一致するか確認
+        // Path traversal guard: strip directory components and validate format
         string safeId = Path.GetFileName(targetId ?? "");
         if (safeId != targetId || !safeId.EndsWith(".json") || safeId.Length < 10)
         {
@@ -267,18 +255,15 @@
 
         if (File.Exists(filePath))
         {
-            try 
+            try
             {
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
                 string content = File.ReadAllText(filePath);
                 var noteObj = serializer.Deserialize<Dictionary<string, string>>(content);
-                
+
                 string authorId = noteObj.ContainsKey("author_id") ? noteObj["author_id"] : (noteObj.ContainsKey("author") ? noteObj["author"] : "");
 
-                // �{�l�m�F (ID���m�Ŕ�r)
                 bool isMine = authorId.Equals(currentUserId, StringComparison.OrdinalIgnoreCase);
-
-                // �Ǘ��҃p�X���[�h�m�F
                 bool isAdmin = (!string.IsNullOrEmpty(adminPass) && ComputeSha256Hash(adminPass) == MASTER_PASS_HASH);
 
                 if (isMine || isAdmin)
@@ -288,18 +273,18 @@
                 }
                 else
                 {
-                    Response.Write("{\"status\":\"error\", \"message\":\"����������܂���B\"}");
+                    Response.Write("{\"status\":\"error\", \"message\":\"権限がありません。\"}");
                 }
             }
             catch (Exception ex)
             {
                 LogError("DeleteNote", ex);
-                Response.Write("{\"status\":\"error\", \"message\":\"�폜�����Ɏ��s���܂���\"}");
+                Response.Write("{\"status\":\"error\", \"message\":\"削除処理に失敗しました\"}");
             }
         }
         else
         {
-            Response.Write("{\"status\":\"error\", \"message\":\"���ɍ폜����Ă��܂�\"}");
+            Response.Write("{\"status\":\"error\", \"message\":\"既に削除されています\"}");
         }
         Response.End();
     }
@@ -310,10 +295,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>�ق킢�Ƃځ[�� - �`����</title>
+<title>ほわいとぼーど - 伝言板</title>
 <script src="./common/jquery-3.6.0.min.js"></script>
 <style>
-    /* CSS�͑O��Ɠ��� */
     body { font-family: "Meiryo UI", sans-serif; background-color: #f4f7f6; margin: 0; color: #333; }
     header { background-color: #0056b3; color: white; padding: 15px 25px; display: flex; align-items: baseline; box-shadow: 0 2px 5px rgba(0,0,0,0.15); }
     .logo-main { font-size: 1.8rem; font-weight: bold; margin-right: 15px; }
@@ -326,7 +310,7 @@
     .note.red    { background-color: #ffebee; border-top: 4px solid #ef5350; }
     .note.green  { background-color: #e8f5e9; border-top: 4px solid #66bb6a; }
     .note-meta { display: flex; justify-content: space-between; font-size: 0.75rem; color: #888; margin-bottom: 8px; border-bottom: 1px dashed #ccc; padding-bottom: 4px; }
-    .note-author { font-size: 0.8rem; color: #0056b3; text-align: right; margin-top: auto; font-weight: bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } /* ���O�������ꍇ�̑΍� */
+    .note-author { font-size: 0.8rem; color: #0056b3; text-align: right; margin-top: auto; font-weight: bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .note-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 10px; overflow: hidden; max-height: 3em; line-height: 1.4; }
     .note-body { flex-grow: 1; font-size: 0.95rem; overflow-y: auto; line-height: 1.6; white-space: pre-wrap; word-break: break-all; margin-bottom: 5px; }
     .btn-delete-mine { position: absolute; top: 5px; right: 5px; width: 24px; height: 24px; line-height: 24px; text-align: center; color: #999; cursor: pointer; font-weight: bold; font-size: 16px; background: rgba(255,255,255,0.8); border-radius: 50%; }
@@ -350,48 +334,48 @@
 <body>
 
     <header>
-        <div class="logo-main">�ق킢�Ƃځ[��</div>
-        <div class="logo-sub">�`����</div>
+        <div class="logo-main">ほわいとぼーど</div>
+        <div class="logo-sub">伝言板</div>
     </header>
 
     <div id="board"></div>
-    <div id="fab-add" title="������\��">�{</div>
-    <div id="admin-mode-toggle" title="�Ǘ��ҍ폜">Admin</div>
+    <div id="fab-add" title="新規掲示">+</div>
+    <div id="admin-mode-toggle" title="管理者削除">Admin</div>
 
     <div id="modal-post" class="modal-overlay">
         <div class="modal-content">
-            <h3 style="margin-top:0;">�V�K�\��t��</h3>
+            <h3 style="margin-top:0;">新規掲示付け</h3>
             <p style="font-size:0.85rem; color:#d32f2f; background:#ffebee; padding:5px; border-radius:4px;">
-                �����Ȃ��̎����œ��e����܂��B<br>
-                �����e��7����Ɏ����I�ɍ폜����܂��B
+                誰でも見られる場所に内容を貼ります。<br>
+                内容は7日後に自動的に削除されます。
             </p>
-            <div class="form-group"><label>����</label><input type="text" id="input-title" placeholder="��F�N���������ނ̒�o�ɂ���"></div>
-            <div class="form-group"><label>���e</label><textarea id="input-body" placeholder="���e����͂��Ă�������..."></textarea></div>
+            <div class="form-group"><label>タイトル</label><input type="text" id="input-title" placeholder="例：クリスマス会参加のお知らせ"></div>
+            <div class="form-group"><label>内容</label><textarea id="input-body" placeholder="内容を入力してください..."></textarea></div>
             <div class="form-group">
-                <label>�tⳂ̐F</label>
+                <label>付箋の色</label>
                 <select id="input-color">
-                    <option value="yellow">���F�i��ʁj</option>
-                    <option value="blue">�F�i�ʒm�E���m�j</option>
-                    <option value="red">�ԐF�i�d�v�E�ً}�j</option>
-                    <option value="green">�ΐF�i�C�x���g�E���̑��j</option>
+                    <option value="yellow">黄色（一般）</option>
+                    <option value="blue">青色（通知・確認）</option>
+                    <option value="red">赤色（重要・緊急）</option>
+                    <option value="green">緑色（イベント・その他）</option>
                 </select>
             </div>
             <div class="btn-area">
-                <button class="btn-cancel" onclick="$('#modal-post').hide()">�L�����Z��</button>
-                <button class="btn-submit" id="btn-save">�\��</button>
+                <button class="btn-cancel" onclick="$('#modal-post').hide()">キャンセル</button>
+                <button class="btn-submit" id="btn-save">掲示</button>
             </div>
         </div>
     </div>
 
     <div id="modal-admin-delete" class="modal-overlay">
         <div class="modal-content" style="max-width: 400px;">
-            <h3 style="margin-top:0;">�Ǘ��ҋ����폜</h3>
-            <p>�Ǘ��҃p�X���[�h����͂��Ă��������B</p>
+            <h3 style="margin-top:0;">管理者強制削除</h3>
+            <p>管理者パスワードを入力してください。</p>
             <input type="hidden" id="admin-target-id">
-            <div class="form-group"><input type="password" id="admin-pass" placeholder="�p�X���[�h"></div>
+            <div class="form-group"><input type="password" id="admin-pass" placeholder="パスワード"></div>
             <div class="btn-area">
-                <button class="btn-cancel" onclick="$('#modal-admin-delete').hide()">�L�����Z��</button>
-                <button class="btn-danger" id="btn-exec-admin-delete">�폜���s</button>
+                <button class="btn-cancel" onclick="$('#modal-admin-delete').hide()">キャンセル</button>
+                <button class="btn-danger" id="btn-exec-admin-delete">削除実行</button>
             </div>
         </div>
     </div>
@@ -407,19 +391,19 @@
 
         $('#btn-save').on('click', function() {
             var title = $('#input-title').val(), body = $('#input-body').val(), color = $('#input-color').val();
-            if(!title || !body) { alert('�����Ɠ��e�͕K�{�ł��B'); return; }
-            var $btn = $(this); $btn.prop('disabled', true).text('�ۑ���...');
-            
+            if(!title || !body) { alert('タイトルと内容は必須です。'); return; }
+            var $btn = $(this); $btn.prop('disabled', true).text('保存中...');
+
             $.post('Default.aspx?action=save', { title: title, body: body, color: color }, function() {
                 $('#modal-post').hide(); loadNotes();
             }).fail(function(xhr){
-                alert('�G���[���������܂����B\n' + xhr.responseText);
-            }).always(function(){ $btn.prop('disabled', false).text('�\��'); });
+                alert('エラーが発生しました。\n' + xhr.responseText);
+            }).always(function(){ $btn.prop('disabled', false).text('掲示'); });
         });
 
         $(document).on('click', '.btn-delete-mine', function() {
             var id = $(this).data('id');
-            if(confirm('���̓��e���폜���܂����H')) {
+            if(confirm('この内容を削除しますか？')) {
                 $.post('Default.aspx?action=delete', { id: id }, function(res) {
                     var data = (typeof res === 'string') ? JSON.parse(res) : res;
                     if(data.status === 'success') { loadNotes(); }
@@ -431,13 +415,13 @@
         var adminMode = false;
         $('#admin-mode-toggle').on('click', function() {
             adminMode = !adminMode;
-            if(adminMode) { alert('�Ǘ��ҍ폜���[�h�FON'); $('.note').css('cursor', 'crosshair'); }
-            else { alert('�Ǘ��ҍ폜���[�h�FOFF'); $('.note').css('cursor', 'default'); }
+            if(adminMode) { alert('管理者削除モード：ON'); $('.note').css('cursor', 'crosshair'); }
+            else { alert('管理者削除モード：OFF'); $('.note').css('cursor', 'default'); }
         });
 
         $(document).on('click', '.note', function() {
             if(!adminMode) return;
-            var noteId = $(this).data('id'); 
+            var noteId = $(this).data('id');
             $('#admin-target-id').val(noteId);
             $('#admin-pass').val('');
             $('#modal-admin-delete').css('display', 'flex');
@@ -457,15 +441,15 @@
         function loadNotes() {
             $.getJSON('Default.aspx?action=load', function(data) {
                 var $board = $('#board'); $board.empty();
-                if(data.length === 0) { $board.html('<p style="color:#777; margin:20px; text-align:center; width:100%;">���݁A�f������Ă�����͂���܂���B</p>'); return; }
-                
+                if(data.length === 0) { $board.html('<p style="color:#777; margin:20px; text-align:center; width:100%;">現在、掲示されているものはありません。</p>'); return; }
+
                 data.sort(function(a, b) { return (a.post_date < b.post_date) ? 1 : -1; });
                 $.each(data, function(i, item) {
-                    var deleteBtn = item.is_mine ? `<div class="btn-delete-mine" data-id="${item.id}" title="�폜">�~</div>` : '';
+                    var deleteBtn = item.is_mine ? `<div class="btn-delete-mine" data-id="${item.id}" title="削除">×</div>` : '';
                     var html = `
                         <div class="note ${item.color}" data-id="${item.id}">
                             ${deleteBtn}
-                            <div class="note-meta"><span>${item.post_date}</span><span>(�`${item.expire_disp})</span></div>
+                            <div class="note-meta"><span>${item.post_date}</span><span>(〜${item.expire_disp})</span></div>
                             <div class="note-title" title="${item.title}">${item.title}</div>
                             <div class="note-body">${item.body}</div>
                             <div class="note-author">by ${item.author_disp}</div>
