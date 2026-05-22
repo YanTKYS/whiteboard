@@ -449,7 +449,7 @@
                     var html = `
                         <div class="note ${item.color}" data-id="${item.id}">
                             ${deleteBtn}
-                            <div class="note-meta"><span>${item.post_date}</span><span>(〜${item.expire_disp})</span></div>
+                            <div class="note-meta"><span>${item.post_date}</span><span>(～${item.expire_disp})</span></div>
                             <div class="note-title" title="${item.title}">${item.title}</div>
                             <div class="note-body">${item.body}</div>
                             <div class="note-author">by ${item.author_disp}</div>
