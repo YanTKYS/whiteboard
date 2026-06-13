@@ -18,6 +18,8 @@
     // Admin password hash (plain: admin9999)
     private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272";
 
+    private static readonly string[] VALID_COLORS = { "yellow", "blue", "red", "green" };
+
     // Create a folder and place a web.config that blocks direct HTTP access
     private void EnsureProtectedFolder(string folderPath)
     {
@@ -86,7 +88,6 @@
                 UserPrincipal user = UserPrincipal.FindByIdentity(ctx, username);
                 if (user != null && !string.IsNullOrEmpty(user.DisplayName))
                 {
-                    //return user.DisplayName + "(" + username + ")";
                     HttpRuntime.Cache.Insert(cacheKey, user.DisplayName, null,
                         DateTime.Now.AddMinutes(60), System.Web.Caching.Cache.NoSlidingExpiration);
                     return user.DisplayName;
@@ -98,6 +99,14 @@
             LogError("GetAdDisplayName", ex);
         }
         return domainUser;
+    }
+
+    // Extract author_id with fallback to legacy "author" key
+    private static string GetAuthorId(Dictionary<string, string> noteObj)
+    {
+        if (noteObj.ContainsKey("author_id")) return noteObj["author_id"];
+        if (noteObj.ContainsKey("author"))    return noteObj["author"];
+        return "";
     }
 
     // SHA-256 hash helper
@@ -120,7 +129,7 @@
             string title = Request["title"];
             string body = Request["body"];
             string color = Request["color"];
-            if (Array.IndexOf(new[] { "yellow", "blue", "red", "green" }, color) < 0) color = "yellow";
+            if (Array.IndexOf(VALID_COLORS, color) < 0) color = "yellow";
 
             string currentUserId = User.Identity.Name;
 
@@ -204,8 +213,7 @@
                 string content = File.ReadAllText(file);
                 var noteObj = serializer.Deserialize<Dictionary<string, string>>(content);
 
-                // Compat: fall back to legacy "author" key if "author_id" is absent
-                string authorId = noteObj.ContainsKey("author_id") ? noteObj["author_id"] : (noteObj.ContainsKey("author") ? noteObj["author"] : "");
+                string authorId = GetAuthorId(noteObj);
 
                 string authorName = noteObj.ContainsKey("author_name") ? noteObj["author_name"] : authorId;
                 // Strip domain prefix (e.g. DOMAIN\taro -> taro)
@@ -252,6 +260,7 @@
         }
 
         string filePath = Path.Combine(DataFolderPath, safeId);
+        Response.ContentType = "application/json";
 
         if (File.Exists(filePath))
         {
@@ -261,7 +270,7 @@
                 string content = File.ReadAllText(filePath);
                 var noteObj = serializer.Deserialize<Dictionary<string, string>>(content);
 
-                string authorId = noteObj.ContainsKey("author_id") ? noteObj["author_id"] : (noteObj.ContainsKey("author") ? noteObj["author"] : "");
+                string authorId = GetAuthorId(noteObj);
 
                 bool isMine = authorId.Equals(currentUserId, StringComparison.OrdinalIgnoreCase);
                 bool isAdmin = (!string.IsNullOrEmpty(adminPass) && ComputeSha256Hash(adminPass) == MASTER_PASS_HASH);
@@ -381,6 +390,10 @@
     .btn-cancel { background-color: #f0f0f0; color: #333; }
     .btn-submit { background-color: #0056b3; color: white; }
     .btn-danger { background-color: #d32f2f; color: white; }
+
+    /* ---- Board status messages ---- */
+    .board-msg { color: #777; margin: 40px auto; text-align: center; width: 100%; }
+    .board-msg.error { color: #e53935; }
 </style>
 </head>
 <body>
@@ -448,7 +461,7 @@
             </div>
             <div class="btn-area">
                 <span class="btn-hint">Ctrl+Enter で送信</span>
-                <button class="btn-cancel" onclick="$('#modal-post').hide()">キャンセル</button>
+                <button class="btn-cancel" id="btn-cancel-post">キャンセル</button>
                 <button class="btn-submit" id="btn-save">掲示</button>
             </div>
         </div>
@@ -480,6 +493,9 @@
         // ---- Initial load ----
         loadNotes();
 
+        // ---- Helpers ----
+        function parseResponse(res) { return (typeof res === 'string') ? JSON.parse(res) : res; }
+
         // ---- Toast ----
         function showToast(msg) {
             var $t = $('<div class="toast">').text(msg);
@@ -498,6 +514,9 @@
         }
         $('#input-title').on('input', function() { updateCounter($(this), $('#counter-title'), TITLE_MAX); });
         $('#input-body').on('input',  function() { updateCounter($(this), $('#counter-body'),  BODY_MAX);  });
+
+        // ---- Cancel buttons ----
+        $('#btn-cancel-post').on('click', function() { $('#modal-post').hide(); });
 
         // ---- FAB ----
         $('#fab-add').on('click', function() {
@@ -529,7 +548,7 @@
             var id = $(this).data('id');
             if (confirm('この内容を削除しますか？')) {
                 $.post('Default.aspx?action=delete', { id: id }, function(res) {
-                    var data = (typeof res === 'string') ? JSON.parse(res) : res;
+                    var data = parseResponse(res);
                     if (data.status === 'success') { loadNotes(); showToast('削除しました'); }
                     else { showToast(data.message); }
                 });
@@ -553,7 +572,7 @@
         $('#btn-exec-admin-delete').on('click', function() {
             var id = $('#admin-target-id').val(), pass = $('#admin-pass').val();
             $.post('Default.aspx?action=delete', { id: id, admin_pass: pass }, function(res) {
-                var data = (typeof res === 'string') ? JSON.parse(res) : res;
+                var data = parseResponse(res);
                 if (data.status === 'success') { $('#modal-admin-delete').hide(); loadNotes(); showToast('削除しました'); }
                 else { showToast(data.message); }
             });
@@ -594,7 +613,7 @@
                 notesData = data;
                 renderNotes();
             }).fail(function() {
-                $('#board').html('<p style="color:#e53935; margin:20px; text-align:center; width:100%;">読み込みに失敗しました。ページを更新してください。</p>');
+                $('#board').html('<p class="board-msg error">読み込みに失敗しました。ページを更新してください。</p>');
             });
         }
 
@@ -615,7 +634,7 @@
             });
 
             if (sorted.length === 0) {
-                $board.html('<p style="color:#777; margin:20px; text-align:center; width:100%;">現在、掲示されているものはありません。</p>');
+                $board.html('<p class="board-msg">現在、掲示されているものはありません。</p>');
                 return;
             }
 
