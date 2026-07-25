@@ -1,9 +1,11 @@
-<%@ Page Language="C#" Debug="true" %>
+<%@ Page Language="C#" ValidateRequest="false" %>
 <%@ Import Namespace="System.IO" %>
 <%@ Import Namespace="System.Web.Script.Serialization" %>
 <%@ Import Namespace="System.Collections.Generic" %>
 <%@ Import Namespace="System.Security.Cryptography" %>
 <%@ Import Namespace="System.Text" %>
+<%@ Import Namespace="System.Text.RegularExpressions" %>
+<%@ Import Namespace="System.Globalization" %>
 <%-- Import AD library --%>
 <%@ Import Namespace="System.DirectoryServices.AccountManagement" %>
 
@@ -11,29 +13,64 @@
     // ==========================================
     // Server-side code (C#)
     // ==========================================
+    // Note: ValidateRequest is disabled because notes may legitimately contain
+    // "<" or "&". Every stored value is HtmlEncode()d on save and the only other
+    // input (the note id) is matched against NoteIdPattern before touching disk.
 
-    private string DataFolderPath { get { return Server.MapPath("./data/"); } }
-    private string LogFolderPath  { get { return Server.MapPath("./logs/"); } }
+    private const int TITLE_MAX_LENGTH = 50;
+    private const int BODY_MAX_LENGTH  = 400;
+    private const int EXPIRE_DAYS      = 7;
+    private const int AD_CACHE_MINUTES = 60;
 
     // Admin password hash (plain: admin9999)
     private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272";
 
-    private static readonly string[] VALID_COLORS = { "yellow", "blue", "red", "green" };
+    // Single source of truth for the sticky-note colors: the server whitelist,
+    // the legend, the filter buttons and the post form are all built from this.
+    private class ColorDef
+    {
+        public string Key;
+        public string Label;
+        public string ShortLabel;
+        public ColorDef(string key, string label, string shortLabel)
+        {
+            Key = key; Label = label; ShortLabel = shortLabel;
+        }
+    }
+
+    private static readonly ColorDef[] COLORS = {
+        new ColorDef("yellow", "黄色（一般）",          "黄"),
+        new ColorDef("blue",   "青色（通知・確認）",     "青"),
+        new ColorDef("red",    "赤色（重要・緊急）",     "赤"),
+        new ColorDef("green",  "緑色（イベント・その他）", "緑")
+    };
+    private const string DEFAULT_COLOR = "yellow";
+
+    // Data file name: yyyyMMdd_<GUID>.json
+    private static readonly Regex NoteIdPattern = new Regex(
+        @"^\d{8}_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.json$",
+        RegexOptions.CultureInvariant);
+
+    // Files are written without a BOM so that plain text tools read them cleanly
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
+
+    // Relative (not "~/") so the app also works as a plain virtual directory
+    private string DataFolderPath { get { return Server.MapPath("./data/"); } }
+    private string LogFolderPath  { get { return Server.MapPath("./logs/"); } }
+
+    private const string BLOCK_ACCESS_CONFIG =
+        "<?xml version=\"1.0\"?><configuration><system.webServer><handlers><clear /></handlers></system.webServer></configuration>";
 
     // Create a folder and place a web.config that blocks direct HTTP access
     private void EnsureProtectedFolder(string folderPath)
     {
-        if (!Directory.Exists(folderPath))
-        {
-            Directory.CreateDirectory(folderPath);
-            File.WriteAllText(
-                Path.Combine(folderPath, "web.config"),
-                "<?xml version=\"1.0\"?><configuration><system.webServer><handlers><clear /></handlers></system.webServer></configuration>"
-            );
-        }
-    }
+        if (!Directory.Exists(folderPath)) Directory.CreateDirectory(folderPath);
 
-    private void EnsureDataFolder() { EnsureProtectedFolder(DataFolderPath); }
+        // Written separately from the folder creation: an existing folder that
+        // lost its guard file (manual copy, restore, ...) gets it back.
+        string guardFile = Path.Combine(folderPath, "web.config");
+        if (!File.Exists(guardFile)) File.WriteAllText(guardFile, BLOCK_ACCESS_CONFIG, Utf8NoBom);
+    }
 
     private static readonly object _logLock = new object();
     private void LogError(string source, Exception ex)
@@ -41,10 +78,11 @@
         try
         {
             EnsureProtectedFolder(LogFolderPath);
-            string logFile = Path.Combine(LogFolderPath, DateTime.Now.ToString("yyyyMM") + ".log");
+            string logFile = Path.Combine(LogFolderPath, DateTime.Now.ToString("yyyyMM", CultureInfo.InvariantCulture) + ".log");
             string entry = string.Format("[{0}] [{1}] {2}: {3}\r\n",
-                DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"), User.Identity.Name, source, ex.Message);
-            lock (_logLock) { File.AppendAllText(logFile, entry, Encoding.UTF8); }
+                DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss", CultureInfo.InvariantCulture),
+                User.Identity.Name, source, ex.Message);
+            lock (_logLock) { File.AppendAllText(logFile, entry, Utf8NoBom); }
         }
         catch { }
     }
@@ -57,68 +95,173 @@
         if (!User.Identity.IsAuthenticated)
         {
             Response.StatusCode = 401;
+            Response.TrySkipIisCustomErrors = true;
             Response.Write("Windows認証が必要です。IISの設定を確認してください。");
             Response.End();
             return;
         }
 
         string action = Request["action"];
+        if (string.IsNullOrEmpty(action)) return; // no action -> render the page
 
-        if (action == "save") SaveNote();
-        else if (action == "load") GetNotesAndCleanup();
-        else if (action == "delete") DeleteNote();
+        // CSRF guard: jQuery sets this header on same-origin AJAX, while a
+        // cross-site form post cannot set it without a CORS preflight.
+        if (!IsAjaxRequest())
+        {
+            Response.StatusCode = 400;
+            WriteError("不正なリクエストです。");
+            Response.End();
+            return;
+        }
+
+        switch (action)
+        {
+            case "save":   SaveNote(); break;
+            case "load":   GetNotesAndCleanup(); break;
+            case "delete": DeleteNote(); break;
+            default:
+                Response.StatusCode = 400;
+                WriteError("不明なアクションです。");
+                break;
+        }
+        Response.End();
     }
 
-    // Resolve AD display name; result is cached per user for 60 min
+    private bool IsAjaxRequest()
+    {
+        return string.Equals(Request.Headers["X-Requested-With"], "XMLHttpRequest",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ---- JSON responses ----
+
+    private void WriteJson(object payload)
+    {
+        Response.ContentType = "application/json";
+        // Keep our JSON body instead of letting IIS swap in an error page
+        Response.TrySkipIisCustomErrors = true;
+        Response.Write(new JavaScriptSerializer().Serialize(payload));
+    }
+
+    private void WriteError(string message)
+    {
+        WriteJson(new { status = "error", message = message });
+    }
+
+    private void WriteSuccess()
+    {
+        WriteJson(new { status = "success" });
+    }
+
+    // ---- Helpers ----
+
+    private static string GetValue(Dictionary<string, string> source, string key, string fallback)
+    {
+        string value;
+        if (source != null && source.TryGetValue(key, out value) && !string.IsNullOrEmpty(value)) return value;
+        return fallback;
+    }
+
+    // Extract author_id with fallback to legacy "author" key
+    private static string GetAuthorId(Dictionary<string, string> noteObj)
+    {
+        return GetValue(noteObj, "author_id", GetValue(noteObj, "author", ""));
+    }
+
+    private static string NormalizeColor(string color)
+    {
+        foreach (ColorDef c in COLORS)
+        {
+            if (c.Key == color) return color;
+        }
+        return DEFAULT_COLOR;
+    }
+
+    // Strip domain prefix (e.g. DOMAIN\taro -> taro)
+    private static string StripDomain(string name)
+    {
+        int idx = name.LastIndexOf('\\');
+        return idx >= 0 ? name.Substring(idx + 1) : name;
+    }
+
+    // yyyyMMdd as a comparable integer, without going through string parsing
+    private static int ToDateKey(DateTime date)
+    {
+        return date.Year * 10000 + date.Month * 100 + date.Day;
+    }
+
+    private static bool IsExpired(string fileName, int todayKey)
+    {
+        if (fileName.Length < 8) return false;
+
+        int expireKey;
+        if (!int.TryParse(fileName.Substring(0, 8), NumberStyles.None, CultureInfo.InvariantCulture, out expireKey)) return false;
+        return expireKey < todayKey;
+    }
+
+    // Resolve AD display name; result is cached per user for AD_CACHE_MINUTES
     private string GetAdDisplayName(string domainUser)
     {
+        if (string.IsNullOrEmpty(domainUser)) return "";
+
         string cacheKey = "adname_" + domainUser.ToLowerInvariant();
         string cached = HttpRuntime.Cache[cacheKey] as string;
         if (cached != null) return cached;
 
+        string displayName = domainUser;
         try
         {
             string[] parts = domainUser.Split('\\');
-            if (parts.Length != 2) return domainUser;
-
-            string username = parts[1];
+            string username = (parts.Length == 2) ? parts[1] : domainUser;
 
             using (PrincipalContext ctx = new PrincipalContext(ContextType.Domain))
+            using (UserPrincipal user = UserPrincipal.FindByIdentity(ctx, username))
             {
-                UserPrincipal user = UserPrincipal.FindByIdentity(ctx, username);
-                if (user != null && !string.IsNullOrEmpty(user.DisplayName))
-                {
-                    HttpRuntime.Cache.Insert(cacheKey, user.DisplayName, null,
-                        DateTime.Now.AddMinutes(60), System.Web.Caching.Cache.NoSlidingExpiration);
-                    return user.DisplayName;
-                }
+                if (user != null && !string.IsNullOrEmpty(user.DisplayName)) displayName = user.DisplayName;
             }
         }
         catch (Exception ex)
         {
             LogError("GetAdDisplayName", ex);
         }
-        return domainUser;
-    }
 
-    // Extract author_id with fallback to legacy "author" key
-    private static string GetAuthorId(Dictionary<string, string> noteObj)
-    {
-        if (noteObj.ContainsKey("author_id")) return noteObj["author_id"];
-        if (noteObj.ContainsKey("author"))    return noteObj["author"];
-        return "";
+        // Cache failures too, otherwise every request retries a dead lookup
+        HttpRuntime.Cache.Insert(cacheKey, displayName, null,
+            DateTime.Now.AddMinutes(AD_CACHE_MINUTES), System.Web.Caching.Cache.NoSlidingExpiration);
+        return displayName;
     }
 
     // SHA-256 hash helper
-    private string ComputeSha256Hash(string rawData)
+    private static string ComputeSha256Hash(string rawData)
     {
         using (SHA256 sha256Hash = SHA256.Create())
         {
             byte[] bytes = sha256Hash.ComputeHash(Encoding.UTF8.GetBytes(rawData));
-            StringBuilder builder = new StringBuilder();
+            StringBuilder builder = new StringBuilder(bytes.Length * 2);
             for (int i = 0; i < bytes.Length; i++) builder.Append(bytes[i].ToString("x2"));
             return builder.ToString();
         }
+    }
+
+    private static bool IsAdminPassword(string password)
+    {
+        if (string.IsNullOrEmpty(password)) return false;
+        return FixedTimeEquals(ComputeSha256Hash(password), MASTER_PASS_HASH);
+    }
+
+    // Compare hex digests without leaking the match length through timing
+    private static bool FixedTimeEquals(string a, string b)
+    {
+        if (a.Length != b.Length) return false;
+
+        int diff = 0;
+        for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
+        return diff == 0;
+    }
+
+    private static Dictionary<string, string> ReadNote(string filePath)
+    {
+        return new JavaScriptSerializer().Deserialize<Dictionary<string, string>>(File.ReadAllText(filePath));
     }
 
     // 1. Save note
@@ -126,27 +269,35 @@
     {
         try
         {
-            string title = Request["title"];
-            string body = Request["body"];
-            string color = Request["color"];
-            if (Array.IndexOf(VALID_COLORS, color) < 0) color = "yellow";
+            string title = (Request["title"] ?? "").Trim();
+            string body  = (Request["body"] ?? "").Trim();
+            string color = NormalizeColor(Request["color"]);
 
-            string currentUserId = User.Identity.Name;
-
-            if (string.IsNullOrEmpty(title) || string.IsNullOrEmpty(body))
+            if (title.Length == 0 || body.Length == 0)
             {
-                Response.Write("{\"status\":\"error\",\"message\":\"title and body are required.\"}");
-                Response.End();
+                Response.StatusCode = 400;
+                WriteError("タイトルと内容は必須です。");
                 return;
             }
 
+            // The client also enforces this via maxlength, but that is bypassable
+            if (title.Length > TITLE_MAX_LENGTH || body.Length > BODY_MAX_LENGTH)
+            {
+                Response.StatusCode = 400;
+                WriteError(string.Format("タイトルは{0}文字、内容は{1}文字までです。", TITLE_MAX_LENGTH, BODY_MAX_LENGTH));
+                return;
+            }
+
+            string currentUserId = User.Identity.Name;
             string displayName = GetAdDisplayName(currentUserId);
 
             title = HttpUtility.HtmlEncode(title);
-            body = HttpUtility.HtmlEncode(body).Replace("\n", "<br>");
+            body = HttpUtility.HtmlEncode(body).Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "<br>");
 
-            DateTime expireDate = DateTime.Now.AddDays(7);
-            string fileName = expireDate.ToString("yyyyMMdd") + "_" + Guid.NewGuid().ToString() + ".json";
+            DateTime now = DateTime.Now;
+            DateTime expireDate = now.AddDays(EXPIRE_DAYS);
+            string fileName = expireDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture)
+                + "_" + Guid.NewGuid().ToString() + ".json";
 
             var noteData = new
             {
@@ -156,146 +307,118 @@
                 color = color,
                 author_id = currentUserId, // used for delete auth
                 author_name = displayName, // used for display
-                post_date = DateTime.Now.ToString("yyyy/MM/dd HH:mm"),
-                expire_disp = expireDate.ToString("MM/dd")
+                post_date = now.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
+                expire_disp = expireDate.ToString("MM/dd", CultureInfo.InvariantCulture)
             };
 
-            JavaScriptSerializer serializer = new JavaScriptSerializer();
-            string jsonContent = serializer.Serialize(noteData);
+            EnsureProtectedFolder(DataFolderPath);
+            File.WriteAllText(Path.Combine(DataFolderPath, fileName),
+                new JavaScriptSerializer().Serialize(noteData), Utf8NoBom);
 
-            EnsureDataFolder();
-            File.WriteAllText(Path.Combine(DataFolderPath, fileName), jsonContent);
-
-            Response.ContentType = "application/json";
-            Response.Write("{\"status\":\"success\"}");
+            WriteSuccess();
         }
         catch (Exception ex)
         {
             LogError("SaveNote", ex);
             Response.StatusCode = 500;
-            Response.Write(new JavaScriptSerializer().Serialize(new { status = "error", message = ex.Message }));
+            WriteError("掲示に失敗しました。");
         }
-        Response.End();
     }
 
     // 2. Load notes and delete expired files on the fly
     private void GetNotesAndCleanup()
     {
-        List<object> notes = new List<object>();
-        JavaScriptSerializer serializer = new JavaScriptSerializer();
-        string currentUserId = User.Identity.Name;
-
-        EnsureDataFolder();
-
-        string[] files = Directory.GetFiles(DataFolderPath, "*.json");
-        string todayStr = DateTime.Now.ToString("yyyyMMdd");
-        int todayInt = int.Parse(todayStr);
-
-        foreach (string file in files)
+        try
         {
-            string fileName = Path.GetFileName(file);
-            if (fileName.Length > 8)
+            EnsureProtectedFolder(DataFolderPath);
+
+            string currentUserId = User.Identity.Name;
+            int todayKey = ToDateKey(DateTime.Now);
+            List<object> notes = new List<object>();
+
+            foreach (string file in Directory.GetFiles(DataFolderPath, "*.json"))
             {
-                string datePart = fileName.Substring(0, 8);
-                int expireDateInt;
-                if (int.TryParse(datePart, out expireDateInt))
+                if (IsExpired(Path.GetFileName(file), todayKey))
                 {
-                    if (expireDateInt < todayInt)
-                    {
-                        try { File.Delete(file); } catch { }
-                        continue;
-                    }
+                    try { File.Delete(file); } catch (Exception ex) { LogError("Cleanup", ex); }
+                    continue;
                 }
+
+                try
+                {
+                    Dictionary<string, string> noteObj = ReadNote(file);
+                    string authorId = GetAuthorId(noteObj);
+
+                    notes.Add(new
+                    {
+                        id = GetValue(noteObj, "id", Path.GetFileName(file)),
+                        title = GetValue(noteObj, "title", ""),
+                        body = GetValue(noteObj, "body", ""),
+                        color = NormalizeColor(GetValue(noteObj, "color", DEFAULT_COLOR)),
+                        post_date = GetValue(noteObj, "post_date", ""),
+                        expire_disp = GetValue(noteObj, "expire_disp", ""),
+                        author_disp = StripDomain(GetValue(noteObj, "author_name", authorId)),
+                        is_mine = authorId.Length > 0 && authorId.Equals(currentUserId, StringComparison.OrdinalIgnoreCase)
+                    });
+                }
+                catch (Exception ex) { LogError("GetNotesAndCleanup", ex); }
             }
 
-            try
-            {
-                string content = File.ReadAllText(file);
-                var noteObj = serializer.Deserialize<Dictionary<string, string>>(content);
-
-                string authorId = GetAuthorId(noteObj);
-
-                string authorName = noteObj.ContainsKey("author_name") ? noteObj["author_name"] : authorId;
-                // Strip domain prefix (e.g. DOMAIN\taro -> taro)
-                int bsIdx = authorName.LastIndexOf('\\');
-                if (bsIdx >= 0) authorName = authorName.Substring(bsIdx + 1);
-
-                bool isMine = authorId.Equals(currentUserId, StringComparison.OrdinalIgnoreCase);
-
-                var responseObj = new {
-                    id = noteObj["id"],
-                    title = noteObj["title"],
-                    body = noteObj["body"],
-                    color = noteObj["color"],
-                    post_date = noteObj["post_date"],
-                    expire_disp = noteObj["expire_disp"],
-                    author_disp = authorName,
-                    is_mine = isMine
-                };
-
-                notes.Add(responseObj);
-            }
-            catch (Exception ex) { LogError("GetNotesAndCleanup", ex); }
+            WriteJson(notes);
         }
-
-        Response.ContentType = "application/json";
-        Response.Write(serializer.Serialize(notes));
-        Response.End();
+        catch (Exception ex)
+        {
+            LogError("GetNotesAndCleanup", ex);
+            Response.StatusCode = 500;
+            WriteError("一覧の取得に失敗しました。");
+        }
     }
 
     // 3. Delete note
     private void DeleteNote()
     {
         string targetId = Request["id"];
-        string adminPass = Request["admin_pass"];
-        string currentUserId = User.Identity.Name;
 
-        // Path traversal guard: strip directory components and validate format
-        string safeId = Path.GetFileName(targetId ?? "");
-        if (safeId != targetId || !safeId.EndsWith(".json") || safeId.Length < 10)
+        // Path traversal guard: the id must look exactly like a generated file name
+        if (string.IsNullOrEmpty(targetId) || !NoteIdPattern.IsMatch(targetId))
         {
-            Response.Write("{\"status\":\"error\",\"message\":\"Invalid ID.\"}");
-            Response.End();
+            Response.StatusCode = 400;
+            WriteError("IDが不正です。");
             return;
         }
 
-        string filePath = Path.Combine(DataFolderPath, safeId);
-        Response.ContentType = "application/json";
-
-        if (File.Exists(filePath))
+        string filePath = Path.Combine(DataFolderPath, targetId);
+        if (!File.Exists(filePath))
         {
-            try
-            {
-                JavaScriptSerializer serializer = new JavaScriptSerializer();
-                string content = File.ReadAllText(filePath);
-                var noteObj = serializer.Deserialize<Dictionary<string, string>>(content);
-
-                string authorId = GetAuthorId(noteObj);
-
-                bool isMine = authorId.Equals(currentUserId, StringComparison.OrdinalIgnoreCase);
-                bool isAdmin = (!string.IsNullOrEmpty(adminPass) && ComputeSha256Hash(adminPass) == MASTER_PASS_HASH);
-
-                if (isMine || isAdmin)
-                {
-                    File.Delete(filePath);
-                    Response.Write("{\"status\":\"success\"}");
-                }
-                else
-                {
-                    Response.Write("{\"status\":\"error\", \"message\":\"権限がありません。\"}");
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError("DeleteNote", ex);
-                Response.Write("{\"status\":\"error\", \"message\":\"削除処理に失敗しました\"}");
-            }
+            Response.StatusCode = 404;
+            WriteError("既に削除されています");
+            return;
         }
-        else
+
+        try
         {
-            Response.Write("{\"status\":\"error\", \"message\":\"既に削除されています\"}");
+            string authorId = GetAuthorId(ReadNote(filePath));
+
+            bool isMine = authorId.Length > 0
+                && authorId.Equals(User.Identity.Name, StringComparison.OrdinalIgnoreCase);
+            bool isAdmin = IsAdminPassword(Request["admin_pass"]);
+
+            if (!isMine && !isAdmin)
+            {
+                Response.StatusCode = 403;
+                WriteError("権限がありません。");
+                return;
+            }
+
+            File.Delete(filePath);
+            WriteSuccess();
         }
-        Response.End();
+        catch (Exception ex)
+        {
+            LogError("DeleteNote", ex);
+            Response.StatusCode = 500;
+            WriteError("削除処理に失敗しました");
+        }
     }
 </script>
 
@@ -406,19 +529,17 @@
 
     <div id="controls">
         <div id="legend">
-            <span class="legend-item"><span class="legend-dot yellow"></span>黄色（一般）</span>
-            <span class="legend-item"><span class="legend-dot blue"></span>青色（通知・確認）</span>
-            <span class="legend-item"><span class="legend-dot red"></span>赤色（重要・緊急）</span>
-            <span class="legend-item"><span class="legend-dot green"></span>緑色（イベント・その他）</span>
+<% foreach (var c in COLORS) { %>
+            <span class="legend-item"><span class="legend-dot <%= c.Key %>"></span><%= c.Label %></span>
+<% } %>
         </div>
         <div id="toolbar">
             <div class="ctrl-group">
                 <span class="ctrl-label">絞り込み：</span>
                 <button class="filter-btn active" data-color="all">すべて</button>
-                <button class="filter-btn yellow" data-color="yellow">黄</button>
-                <button class="filter-btn blue"   data-color="blue">青</button>
-                <button class="filter-btn red"    data-color="red">赤</button>
-                <button class="filter-btn green"  data-color="green">緑</button>
+<% foreach (var c in COLORS) { %>
+                <button class="filter-btn <%= c.Key %>" data-color="<%= c.Key %>"><%= c.ShortLabel %></button>
+<% } %>
             </div>
             <div class="ctrl-group">
                 <span class="ctrl-label">並び順：</span>
@@ -438,25 +559,24 @@
             <h3 style="margin-top:0;">新規掲示付け</h3>
             <p style="font-size:0.85rem; color:#d32f2f; background:#ffebee; padding:5px; border-radius:4px;">
                 誰でも見られる場所に内容を貼ります。<br>
-                内容は7日後に自動的に削除されます。
+                内容は<%= EXPIRE_DAYS.ToString() %>日後に自動的に削除されます。
             </p>
             <div class="form-group">
                 <label>タイトル</label>
-                <input type="text" id="input-title" maxlength="50" placeholder="例：クリスマス会参加のお知らせ">
-                <div class="field-footer"><span class="char-counter" id="counter-title">0 / 50</span></div>
+                <input type="text" id="input-title" maxlength="<%= TITLE_MAX_LENGTH.ToString() %>" placeholder="例：クリスマス会参加のお知らせ">
+                <div class="field-footer"><span class="char-counter" id="counter-title">0 / <%= TITLE_MAX_LENGTH.ToString() %></span></div>
             </div>
             <div class="form-group">
                 <label>内容</label>
-                <textarea id="input-body" maxlength="400" placeholder="内容を入力してください..."></textarea>
-                <div class="field-footer"><span class="char-counter" id="counter-body">0 / 400</span></div>
+                <textarea id="input-body" maxlength="<%= BODY_MAX_LENGTH.ToString() %>" placeholder="内容を入力してください..."></textarea>
+                <div class="field-footer"><span class="char-counter" id="counter-body">0 / <%= BODY_MAX_LENGTH.ToString() %></span></div>
             </div>
             <div class="form-group">
                 <label>付箋の色</label>
                 <select id="input-color">
-                    <option value="yellow">黄色（一般）</option>
-                    <option value="blue">青色（通知・確認）</option>
-                    <option value="red">赤色（重要・緊急）</option>
-                    <option value="green">緑色（イベント・その他）</option>
+<% foreach (var c in COLORS) { %>
+                    <option value="<%= c.Key %>"><%= c.Label %></option>
+<% } %>
                 </select>
             </div>
             <div class="btn-area">
@@ -474,7 +594,7 @@
             <input type="hidden" id="admin-target-id">
             <div class="form-group"><input type="password" id="admin-pass" placeholder="パスワード"></div>
             <div class="btn-area">
-                <button class="btn-cancel" onclick="$('#modal-admin-delete').hide()">キャンセル</button>
+                <button class="btn-cancel" id="btn-cancel-admin-delete">キャンセル</button>
                 <button class="btn-danger" id="btn-exec-admin-delete">削除実行</button>
             </div>
         </div>
@@ -483,26 +603,54 @@
     <div id="toast-container"></div>
 
 <script>
-    $(document).ready(function() {
-        var notesData   = [];
+    $(document).ready(function () {
+        var API = 'default.aspx';
+        var TITLE_MAX = <%= TITLE_MAX_LENGTH.ToString() %>, BODY_MAX = <%= BODY_MAX_LENGTH.ToString() %>;
+        var EXPIRING_SOON_DAYS = 2;
+        var DAY_MS = 86400000;
+        var DEFAULT_COLOR = '<%= DEFAULT_COLOR %>';
+
+        var notesData    = [];
         var activeFilter = 'all';
         var activeSort   = 'newest';
         var adminMode    = false;
-        var TITLE_MAX = 50, BODY_MAX = 400;
 
         // ---- Initial load ----
         loadNotes();
 
         // ---- Helpers ----
-        function parseResponse(res) { return (typeof res === 'string') ? JSON.parse(res) : res; }
+        function parseResponse(res) {
+            if (typeof res !== 'string') return res;
+            try { return JSON.parse(res); } catch (e) { return null; }
+        }
+
+        // Pull the server message out of a failed response, else use the fallback
+        function errorMessage(xhr, fallback) {
+            var data = parseResponse(xhr && xhr.responseText);
+            return (data && data.message) ? data.message : fallback;
+        }
+
+        function apiPost(action, data) { return $.post(API + '?action=' + action, data); }
+
+        function escapeHtml(text) {
+            return String(text == null ? '' : text)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function openModal(selector) { $(selector).css('display', 'flex'); }
+        function closeModal(selector) { $(selector).hide(); }
 
         // ---- Toast ----
         function showToast(msg) {
             var $t = $('<div class="toast">').text(msg);
             $('#toast-container').append($t);
-            setTimeout(function() {
+            setTimeout(function () {
                 $t.addClass('out');
-                setTimeout(function() { $t.remove(); }, 300);
+                setTimeout(function () { $t.remove(); }, 300);
             }, 2800);
         }
 
@@ -512,82 +660,103 @@
             $counter.text(len + ' / ' + max);
             $counter.toggleClass('warn', len > Math.floor(max * 0.8));
         }
-        $('#input-title').on('input', function() { updateCounter($(this), $('#counter-title'), TITLE_MAX); });
-        $('#input-body').on('input',  function() { updateCounter($(this), $('#counter-body'),  BODY_MAX);  });
+        $('#input-title').on('input', function () { updateCounter($(this), $('#counter-title'), TITLE_MAX); });
+        $('#input-body').on('input',  function () { updateCounter($(this), $('#counter-body'),  BODY_MAX);  });
 
-        // ---- Cancel buttons ----
-        $('#btn-cancel-post').on('click', function() { $('#modal-post').hide(); });
-
-        // ---- FAB ----
-        $('#fab-add').on('click', function() {
+        // ---- Post modal ----
+        $('#fab-add').on('click', function () {
             $('#input-title').val('').trigger('input');
             $('#input-body').val('').trigger('input');
-            $('#input-color').val('yellow');
-            $('#modal-post').css('display', 'flex');
+            $('#input-color').val(DEFAULT_COLOR);
+            openModal('#modal-post');
             $('#input-title').focus();
         });
+        $('#btn-cancel-post').on('click', function () { closeModal('#modal-post'); });
 
         // ---- Save ----
-        $('#btn-save').on('click', function() {
-            var title = $('#input-title').val(), body = $('#input-body').val(), color = $('#input-color').val();
+        $('#btn-save').on('click', function () {
+            var title = $.trim($('#input-title').val()),
+                body  = $.trim($('#input-body').val()),
+                color = $('#input-color').val();
             if (!title || !body) { showToast('タイトルと内容は必須です。'); return; }
-            var $btn = $(this); $btn.prop('disabled', true).text('保存中...');
-            $.post('Default.aspx?action=save', { title: title, body: body, color: color }, function() {
-                $('#modal-post').hide();
-                loadNotes();
-                showToast('掲示しました');
-            }).fail(function(xhr) {
-                showToast('エラーが発生しました。');
-                console.error(xhr.responseText);
-            }).always(function() { $btn.prop('disabled', false).text('掲示'); });
+
+            var $btn = $(this);
+            $btn.prop('disabled', true).text('保存中...');
+            apiPost('save', { title: title, body: body, color: color })
+                .done(function (res) {
+                    var data = parseResponse(res);
+                    // A 200 response can still carry status:"error" - keep the
+                    // modal (and the typed text) open in that case.
+                    if (data && data.status === 'success') {
+                        closeModal('#modal-post');
+                        loadNotes();
+                        showToast('掲示しました');
+                    } else {
+                        showToast((data && data.message) || '掲示に失敗しました。');
+                    }
+                })
+                .fail(function (xhr) { showToast(errorMessage(xhr, '掲示に失敗しました。')); })
+                .always(function () { $btn.prop('disabled', false).text('掲示'); });
         });
 
-        // ---- Delete own note ----
-        $(document).on('click', '.btn-delete-mine', function(e) {
+        // ---- Delete (shared by the owner button and the admin dialog) ----
+        function deleteNote(id, adminPass, onSuccess) {
+            var payload = { id: id };
+            if (adminPass) payload.admin_pass = adminPass;
+
+            apiPost('delete', payload)
+                .done(function (res) {
+                    var data = parseResponse(res);
+                    if (data && data.status === 'success') {
+                        if (onSuccess) onSuccess();
+                        loadNotes();
+                        showToast('削除しました');
+                    } else {
+                        showToast((data && data.message) || '削除に失敗しました。');
+                    }
+                })
+                .fail(function (xhr) { showToast(errorMessage(xhr, '削除に失敗しました。')); });
+        }
+
+        $(document).on('click', '.btn-delete-mine', function (e) {
             e.stopPropagation(); // prevent triggering admin-mode note click
             var id = $(this).data('id');
-            if (confirm('この内容を削除しますか？')) {
-                $.post('Default.aspx?action=delete', { id: id }, function(res) {
-                    var data = parseResponse(res);
-                    if (data.status === 'success') { loadNotes(); showToast('削除しました'); }
-                    else { showToast(data.message); }
-                });
-            }
+            if (confirm('この内容を削除しますか？')) deleteNote(id, null, null);
         });
 
         // ---- Admin mode ----
-        $('#admin-mode-toggle').on('click', function() {
+        $('#admin-mode-toggle').on('click', function () {
             adminMode = !adminMode;
             $('header').toggleClass('admin-active', adminMode);
             showToast(adminMode ? '管理者削除モード：ON' : '管理者削除モード：OFF');
         });
 
-        $(document).on('click', '.note', function() {
+        $(document).on('click', '.note', function () {
             if (!adminMode) return;
             $('#admin-target-id').val($(this).data('id'));
             $('#admin-pass').val('');
-            $('#modal-admin-delete').css('display', 'flex');
+            openModal('#modal-admin-delete');
+            $('#admin-pass').focus();
         });
 
-        $('#btn-exec-admin-delete').on('click', function() {
-            var id = $('#admin-target-id').val(), pass = $('#admin-pass').val();
-            $.post('Default.aspx?action=delete', { id: id, admin_pass: pass }, function(res) {
-                var data = parseResponse(res);
-                if (data.status === 'success') { $('#modal-admin-delete').hide(); loadNotes(); showToast('削除しました'); }
-                else { showToast(data.message); }
+        $('#btn-cancel-admin-delete').on('click', function () { closeModal('#modal-admin-delete'); });
+
+        $('#btn-exec-admin-delete').on('click', function () {
+            deleteNote($('#admin-target-id').val(), $('#admin-pass').val(), function () {
+                closeModal('#modal-admin-delete');
             });
         });
 
         // ---- Keyboard shortcuts ----
-        $(document).on('keydown', function(e) {
+        $(document).on('keydown', function (e) {
             if (e.key === 'Escape') { $('.modal-overlay:visible').hide(); }
         });
-        $('#input-body').on('keydown', function(e) {
+        $('#input-body').on('keydown', function (e) {
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { $('#btn-save').trigger('click'); }
         });
 
         // ---- Filter ----
-        $('.filter-btn').on('click', function() {
+        $('.filter-btn').on('click', function () {
             var color = $(this).data('color');
             activeFilter = (color !== 'all' && color === activeFilter) ? 'all' : color;
             $('.filter-btn').removeClass('active');
@@ -596,7 +765,7 @@
         });
 
         // ---- Sort ----
-        $('.sort-btn').on('click', function() {
+        $('.sort-btn').on('click', function () {
             activeSort = $(this).data('sort');
             $('.sort-btn').removeClass('active');
             $(this).addClass('active');
@@ -604,67 +773,77 @@
         });
 
         // ---- Close modal on overlay click ----
-        $('.modal-overlay').on('click', function(e) { if (e.target === this) $(this).hide(); });
+        $('.modal-overlay').on('click', function (e) { if (e.target === this) $(this).hide(); });
 
         // ---- Load (fetch) ----
         function loadNotes() {
             $('#board').html('<p class="loading-msg">読み込み中...</p>');
-            $.getJSON('Default.aspx?action=load', function(data) {
-                notesData = data;
+            $.getJSON(API + '?action=load', function (data) {
+                notesData = data || [];
                 renderNotes();
-            }).fail(function() {
+            }).fail(function () {
                 $('#board').html('<p class="board-msg error">読み込みに失敗しました。ページを更新してください。</p>');
             });
+        }
+
+        // ---- Sorting ----
+        function compare(a, b) { return a === b ? 0 : (a < b ? -1 : 1); }
+
+        var SORTERS = {
+            newest: function (a, b) { return compare(String(b.post_date || ''), String(a.post_date || '')); },
+            oldest: function (a, b) { return compare(String(a.post_date || ''), String(b.post_date || '')); },
+            // the id carries a yyyyMMdd prefix, so this is "closest expiry first"
+            expiry: function (a, b) { return compare(String(a.id || ''), String(b.id || '')); }
+        };
+
+        // Days until the expiry date encoded in the file name (null if unparsable)
+        function daysUntilExpiry(id, today) {
+            var m = /^(\d{4})(\d{2})(\d{2})/.exec(String(id || ''));
+            if (!m) return null;
+            var expireDate = new Date(+m[1], +m[2] - 1, +m[3]);
+            return Math.round((expireDate - today) / DAY_MS);
+        }
+
+        function noteHtml(item, today) {
+            var daysLeft = daysUntilExpiry(item.id, today);
+            var expiringSoon = daysLeft !== null && daysLeft >= 0 && daysLeft <= EXPIRING_SOON_DAYS;
+            var expiryBadge = expiringSoon
+                ? '<div class="expiry-badge">あと' + (daysLeft > 0 ? daysLeft + '日' : '本日') + '</div>'
+                : '';
+            var deleteBtn = item.is_mine
+                ? '<div class="btn-delete-mine" data-id="' + escapeHtml(item.id) + '" title="削除">&times;</div>'
+                : '';
+
+            // title / body are stored HTML-encoded by the server, so they go in
+            // as-is; everything else is escaped here.
+            return '' +
+                '<div class="note ' + escapeHtml(item.color) + (expiringSoon ? ' expiring-soon' : '') + '" data-id="' + escapeHtml(item.id) + '">' +
+                    deleteBtn +
+                    '<div class="note-meta"><span>' + escapeHtml(item.post_date) + '</span><span>掲載期限：' + escapeHtml(item.expire_disp) + '</span></div>' +
+                    '<div class="note-title" title="' + item.title + '">' + item.title + '</div>' +
+                    '<div class="note-body">' + item.body + '</div>' +
+                    '<div class="note-footer">' + expiryBadge + '<div class="note-author">by ' + escapeHtml(item.author_disp) + '</div></div>' +
+                '</div>';
         }
 
         // ---- Render (filter + sort + draw) ----
         function renderNotes() {
             var $board = $('#board');
-            $board.empty();
 
             var filtered = activeFilter === 'all'
                 ? notesData
-                : notesData.filter(function(n) { return n.color === activeFilter; });
+                : notesData.filter(function (n) { return n.color === activeFilter; });
 
-            var sorted = filtered.slice().sort(function(a, b) {
-                if (activeSort === 'newest') return a.post_date < b.post_date ? 1 : -1;
-                if (activeSort === 'oldest') return a.post_date > b.post_date ? 1 : -1;
-                if (activeSort === 'expiry') return a.id > b.id ? 1 : -1; // yyyyMMdd prefix
-                return 0;
-            });
-
-            if (sorted.length === 0) {
+            if (filtered.length === 0) {
                 $board.html('<p class="board-msg">現在、掲示されているものはありません。</p>');
                 return;
             }
 
+            var sorted = filtered.slice().sort(SORTERS[activeSort] || SORTERS.newest);
             var today = new Date(); today.setHours(0, 0, 0, 0);
 
-            $.each(sorted, function(i, item) {
-                // Expiry warning: parse yyyyMMdd from file id
-                var es = item.id.substring(0, 8);
-                var expireDate = new Date(+es.substring(0,4), +es.substring(4,6)-1, +es.substring(6,8));
-                var daysLeft = Math.ceil((expireDate - today) / 86400000);
-                var expiringSoon = daysLeft >= 0 && daysLeft <= 2;
-                var expiryBadge = expiringSoon
-                    ? '<div class="expiry-badge">あと' + (daysLeft > 0 ? daysLeft + '日' : '本日') + '</div>'
-                    : '';
-
-                var noteClass = 'note ' + item.color + (expiringSoon ? ' expiring-soon' : '');
-                var deleteBtn = item.is_mine
-                    ? '<div class="btn-delete-mine" data-id="' + item.id + '" title="削除">&times;</div>'
-                    : '';
-
-                var html =
-                    '<div class="' + noteClass + '" data-id="' + item.id + '">' +
-                        deleteBtn +
-                        '<div class="note-meta"><span>' + item.post_date + '</span><span>掲載期限：' + item.expire_disp + '</span></div>' +
-                        '<div class="note-title" title="' + item.title + '">' + item.title + '</div>' +
-                        '<div class="note-body">' + item.body + '</div>' +
-                        '<div class="note-footer">' + expiryBadge + '<div class="note-author">by ' + item.author_disp + '</div></div>' +
-                    '</div>';
-                $board.append(html);
-            });
+            var html = $.map(sorted, function (item) { return noteHtml(item, today); }).join('');
+            $board.html(html);
         }
     });
 </script>
