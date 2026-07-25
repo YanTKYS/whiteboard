@@ -7,12 +7,13 @@ Windows 認証（Active Directory）によりログインユーザーを自動�
 
 ## 機能概要
 
-- **付箋の投稿** : タイトル・本文・色（4色）を指定して付箋を掲示板に貼り付ける
+- **付箋の投稿** : タイトル（50文字以内）・本文（400文字以内）・色（4色）を指定して付箋を掲示板に貼り付ける
 - **自動削除** : 投稿から **7日後** に自動で期限切れ・削除される
 - **本人削除** : 自分が投稿した付箋を削除ボタン（×）で削除できる
 - **管理者削除** : 管理者パスワードで任意の付箋を強制削除できる
 - **AD 表示名取得** : Active Directory の表示名（DisplayName）を投稿者名として表示する
 - **ノーキャッシュ** : 常に最新データを取得するよう HTTP キャッシュを無効化
+- **エラーログ** : サーバー側の例外を `logs/yyyyMM.log` に記録
 
 ### 付箋の色
 
@@ -44,8 +45,12 @@ whiteboard/
 ├── web.config            # IIS・ASP.NET 設定ファイル
 ├── common/
 │   └── jquery-3.6.0.min.js  # jQuery（別途配置が必要）
-└── data/                 # 投稿データ格納フォルダ（実行時に自動生成）
-    └── yyyyMMdd_<GUID>.json  # 付箋データ（1投稿 = 1ファイル）
+├── data/                 # 投稿データ格納フォルダ（実行時に自動生成）
+│   ├── web.config            # 直接 HTTP アクセスを遮断する設定（自動生成）
+│   └── yyyyMMdd_<GUID>.json  # 付箋データ（1投稿 = 1ファイル）
+└── logs/                 # エラーログ格納フォルダ（実行時に自動生成）
+    ├── web.config            # 直接 HTTP アクセスを遮断する設定（自動生成）
+    └── yyyyMM.log            # 月次エラーログ
 ```
 
 ---
@@ -64,8 +69,9 @@ whiteboard/
     └── jquery-3.6.0.min.js   ← jQuery を別途入手して配置
 ```
 
-> `data/` フォルダはアプリが初回アクセス時に自動作成します。  
-> IIS の実行アカウント（アプリプールのユーザー）に `data/` フォルダへの **書き込み権限** が必要です。
+> `data/` `logs/` フォルダはアプリが初回アクセス時に自動作成します。  
+> IIS の実行アカウント（アプリプールのユーザー）に、アプリのルートフォルダへの **書き込み権限** が必要です
+> （`data/` `logs/` の自動生成に使用します）。
 
 > [!WARNING]
 > **`default.aspx` は配置前に Shift-JIS へ変換してください。**  
@@ -95,7 +101,7 @@ IIS マネージャーで対象サイト／アプリに対して以下を設定�
 `web.config` の `targetFramework` をサーバーの .NET バージョンに合わせます（デフォルト: `4.7`）。
 
 ```xml
-<compilation debug="true" targetFramework="4.7">
+<compilation debug="false" targetFramework="4.7">
 ```
 
 ### 4. jQuery の配置
@@ -137,13 +143,31 @@ yyyyMMdd_<GUID>.json
 
 ## API エンドポイント
 
-すべて `Default.aspx` に対するリクエストで処理します。
+すべて `default.aspx` に対するリクエストで処理します。
 
 | action | メソッド | 説明 |
 |---|---|---|
 | `save` | POST | 付箋を投稿する |
 | `load` | GET | 付箋一覧を取得する（期限切れを同時に削除） |
 | `delete` | POST | 付箋を削除する（本人 or 管理者） |
+
+### リクエスト要件
+
+CSRF 対策として、`action` 付きのリクエストには `X-Requested-With: XMLHttpRequest`
+ヘッダーが必要です（jQuery の Ajax は同一オリジンで自動付与します）。
+ヘッダーのないリクエストは `400` を返します。
+
+### レスポンス
+
+`load` は付箋の配列を返します。`save` / `delete` は下記の形式を返します。
+
+```json
+{ "status": "success" }
+{ "status": "error", "message": "権限がありません。" }
+```
+
+エラー時は内容に応じた HTTP ステータス（`400` / `403` / `404` / `500`）を併せて返します。
+クライアントは HTTP ステータスと `status` の両方を判定します。
 
 ---
 
@@ -180,7 +204,11 @@ $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
 ## 注意事項
 
 - **`default.aspx` は IIS 配置前に Shift-JIS へ変換すること。** リポジトリは UTF-8 で管理しているが、IIS（ASP.NET）は Shift-JIS を要求するためコンパイルエラーになる（「セットアップ手順 1」参照）。
-- `web.config` の `debug="true"` は開発・検証時のみ使用し、**本番運用時は `false`** に変更してください。
-- `customErrors mode="Off"` はエラー詳細がブラウザに表示されます。本番では `RemoteOnly` または `On` を推奨します。
+- `web.config` の `debug` は既定で `false`（本番向け）です。開発・検証時のみ `true` に変更してください。
+- `customErrors mode` は既定で `RemoteOnly`（サーバー上のブラウザからのみエラー詳細を表示）です。
+- `default.aspx` は `ValidateRequest="false"`（+ `web.config` の `requestValidationMode="2.0"`）で動作します。
+  「10<20」のように `<` を含む投稿を ASP.NET の要求検証エラーにしないための設定で、
+  投稿値はサーバー側で必ず HtmlEncode してから保存・出力しています。
 - 本システムは閉域ネットワーク内での利用を想定しています。インターネット公開環境での使用は想定外です。
 - 投稿内容は HtmlEncode によりエスケープされますが、管理・運用ルールの整備も合わせて実施してください。
+- 管理者パスワードはソルトなしの SHA-256 ハッシュで保持しています。閉域網の簡易保護であり、強度の高い認証機構ではありません。
