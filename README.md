@@ -43,6 +43,9 @@ Windows 認証（Active Directory）によりログインユーザーを自動�
 whiteboard/
 ├── default.aspx          # アプリ本体（サーバーサイド C# + HTML/CSS/JS を一枚に集約）
 ├── web.config            # IIS・ASP.NET 設定ファイル
+├── secrets.config        # 管理者パスワード（リポジトリ管理外・手動作成）
+├── secrets.config.sample # 上記のひな形
+├── .gitignore            # data/ logs/ secrets.config などの誤コミット防止
 ├── common/
 │   └── jquery-3.6.0.min.js  # jQuery（別途配置が必要）
 ├── data/                 # 投稿データ格納フォルダ（実行時に自動生成）
@@ -65,6 +68,7 @@ IIS の仮想ディレクトリまたはサイトルートに以下を配置し�
 whiteboard/
 ├── default.aspx
 ├── web.config
+├── secrets.config            ← 手順 5 で作成
 └── common/
     └── jquery-3.6.0.min.js   ← jQuery を別途入手して配置
 ```
@@ -108,6 +112,20 @@ IIS マネージャーで対象サイト／アプリに対して以下を設定�
 
 [jQuery 公式サイト](https://jquery.com/) または社内ミラーから `jquery-3.6.0.min.js` を入手し、  
 `common/` フォルダに配置してください。
+
+### 5. 管理者パスワードの設定
+
+`secrets.config.sample` を `secrets.config` にコピーし、後述の手順で生成した値を設定します。
+
+```
+copy secrets.config.sample secrets.config
+```
+
+> [!IMPORTANT]
+> `secrets.config` を作成しない、または値が空のままだと **管理者削除機能は動作しません**
+> （どのパスワードも受け付けない fail-closed 動作）。投稿・閲覧・本人削除は通常どおり動きます。
+>
+> `secrets.config` は `.gitignore` 済みです。**リポジトリにコミットしないでください。**
 
 ---
 
@@ -176,28 +194,72 @@ CSRF 対策として、`action` 付きのリクエストには `X-Requested-With
 管理者削除機能は、画面左下の **Admin** リンクをクリックして管理者モードに切り替えると使用できます。  
 任意の付箋をクリックするとパスワード入力ダイアログが表示されます。
 
-### デフォルトパスワード
+> [!IMPORTANT]
+> **デフォルトパスワードは存在しません。** 管理者削除を使うには、以下の手順で
+> `secrets.config` に値を設定する必要があります。未設定のままだと管理者削除は
+> 常に拒否されます（fail-closed）。
+
+### 保存形式
+
+パスワードは **PBKDF2-HMAC-SHA1（ソルト付き・10万回反復）** で導出した値として、
+リポジトリ管理外の `secrets.config` に保存します。ソースコードには一切埋め込みません。
 
 ```
-admin9999
+<反復回数>$<ソルトBase64>$<ハッシュBase64>
 ```
 
-### パスワードの変更方法
+| 項目 | 最小要件 |
+|---|---|
+| 反復回数 | 100,000 以上 |
+| ソルト | 16 バイト以上のランダム値 |
+| ハッシュ | 32 バイト以上 |
 
-`default.aspx` 冒頭の以下の定数を、新しいパスワードの **SHA-256 ハッシュ値**（小文字16進数）に置き換えます。
+いずれかを満たさない値・書式不正の値は、設定ミスとみなして拒否されます。
 
-```csharp
-private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272";
-```
+### パスワードの設定・変更方法
 
-SHA-256 ハッシュの生成例（PowerShell）:
+**1. 値を生成する**（PowerShell / Windows Server 上でそのまま実行できます）
 
 ```powershell
-$pass = "新しいパスワード"
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($pass)
-$hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
-($hash | ForEach-Object { $_.ToString("x2") }) -join ""
+$secure = Read-Host "管理者パスワードを入力" -AsSecureString
+$plain  = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+              [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+
+$iterations = 100000
+$salt = New-Object byte[] 16
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($salt)
+
+$pbkdf2 = New-Object Security.Cryptography.Rfc2898DeriveBytes `
+              -ArgumentList $plain, $salt, $iterations
+$hash = $pbkdf2.GetBytes(32)
+
+"{0}`${1}`${2}" -f $iterations,
+                   [Convert]::ToBase64String($salt),
+                   [Convert]::ToBase64String($hash)
 ```
+
+出力例（`$` 区切りの 1 行）:
+
+```
+100000$Yk3v...==$9tQm...=
+```
+
+**2. `secrets.config` に貼り付ける**
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<appSettings>
+  <add key="AdminPassword" value="100000$Yk3v...==$9tQm...=" />
+</appSettings>
+```
+
+保存すると ASP.NET がアプリを再起動し、次のリクエストから新しいパスワードが有効になります。
+`default.aspx` の再ビルドや再配置は不要です。
+
+> [!WARNING]
+> 生成した値・元のパスワードを、`web.config` や `default.aspx`、コミットメッセージ、
+> Issue などに書き込まないでください。`secrets.config` は `.gitignore` 済みですが、
+> `git add -f` で強制追加しないよう注意してください。
 
 ---
 
@@ -211,4 +273,6 @@ $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
   投稿値はサーバー側で必ず HtmlEncode してから保存・出力しています。
 - 本システムは閉域ネットワーク内での利用を想定しています。インターネット公開環境での使用は想定外です。
 - 投稿内容は HtmlEncode によりエスケープされますが、管理・運用ルールの整備も合わせて実施してください。
-- 管理者パスワードはソルトなしの SHA-256 ハッシュで保持しています。閉域網の簡易保護であり、強度の高い認証機構ではありません。
+- 管理者パスワードはソルト付き PBKDF2（10万回反復）で `secrets.config` に保持し、リポジトリには含めません。ただし全管理者で共有する単一パスワードであり、試行回数制限もありません。閉域網かつ Windows 認証済みユーザーのみが到達できる前提の簡易保護です。
+- `data/` `logs/` および `secrets.config` は `.gitignore` 済みです。これらには社内ユーザー名・AD 表示名・伝言本文が含まれるため、リポジトリにコミットしないでください。
+- `web.config` で `<deny users="?" />` を設定し、IIS 側の認証設定と二重に未認証アクセスを遮断しています。IIS で Windows 認証が有効になっていない場合は起動時に構成エラーとなります（フェイルクローズ）。

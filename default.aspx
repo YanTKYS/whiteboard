@@ -6,6 +6,7 @@
 <%@ Import Namespace="System.Text" %>
 <%@ Import Namespace="System.Text.RegularExpressions" %>
 <%@ Import Namespace="System.Globalization" %>
+<%@ Import Namespace="System.Web.Configuration" %>
 <%-- Import AD library --%>
 <%@ Import Namespace="System.DirectoryServices.AccountManagement" %>
 
@@ -22,8 +23,16 @@
     private const int EXPIRE_DAYS      = 7;
     private const int AD_CACHE_MINUTES = 60;
 
-    // Admin password hash (plain: admin9999)
-    private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272";
+    // Floors for the stored admin password material; anything weaker is
+    // treated as misconfiguration and rejected outright.
+    private const int MIN_PBKDF2_ITERATIONS = 100000;
+    private const int MIN_SALT_BYTES        = 16;
+    private const int MIN_HASH_BYTES        = 32;
+
+    // The admin password is never stored in this file. An <appSettings> entry
+    // supplied out-of-band (see secrets.config.sample) holds the PBKDF2
+    // material; when it is absent, admin deletion is simply unavailable.
+    private const string ADMIN_PASSWORD_SETTING = "AdminPassword";
 
     // Single source of truth for the sticky-note colors: the server whitelist,
     // the legend, the filter buttons and the post form are all built from this.
@@ -231,26 +240,48 @@
         return displayName;
     }
 
-    // SHA-256 hash helper
-    private static string ComputeSha256Hash(string rawData)
+    // Verify the admin password against the PBKDF2 material in <appSettings>.
+    // Stored form: "<iterations>$<salt-base64>$<hash-base64>" (see README).
+    // A missing, empty or malformed value accepts no password at all, so an
+    // unconfigured deployment loses admin deletion rather than opening it up.
+    private bool IsAdminPassword(string password)
     {
-        using (SHA256 sha256Hash = SHA256.Create())
+        if (string.IsNullOrEmpty(password)) return false;
+
+        string stored = WebConfigurationManager.AppSettings[ADMIN_PASSWORD_SETTING];
+        if (string.IsNullOrEmpty(stored)) return false;
+
+        try
         {
-            byte[] bytes = sha256Hash.ComputeHash(Encoding.UTF8.GetBytes(rawData));
-            StringBuilder builder = new StringBuilder(bytes.Length * 2);
-            for (int i = 0; i < bytes.Length; i++) builder.Append(bytes[i].ToString("x2"));
-            return builder.ToString();
+            string[] parts = stored.Split('$');
+            if (parts.Length != 3) return false;
+
+            int iterations;
+            if (!int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out iterations)
+                || iterations < MIN_PBKDF2_ITERATIONS) return false;
+
+            byte[] salt = Convert.FromBase64String(parts[1]);
+            byte[] expected = Convert.FromBase64String(parts[2]);
+            if (salt.Length < MIN_SALT_BYTES || expected.Length < MIN_HASH_BYTES) return false;
+
+            // The 3-argument constructor is PBKDF2-HMAC-SHA1; the overload that
+            // selects SHA-256 only exists from .NET Framework 4.7.2 and we
+            // target 4.7, so the iteration count carries the cost here.
+            using (Rfc2898DeriveBytes pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations))
+            {
+                return FixedTimeEquals(pbkdf2.GetBytes(expected.Length), expected);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Malformed configuration, not a wrong password - worth recording
+            LogError("IsAdminPassword", ex);
+            return false;
         }
     }
 
-    private static bool IsAdminPassword(string password)
-    {
-        if (string.IsNullOrEmpty(password)) return false;
-        return FixedTimeEquals(ComputeSha256Hash(password), MASTER_PASS_HASH);
-    }
-
-    // Compare hex digests without leaking the match length through timing
-    private static bool FixedTimeEquals(string a, string b)
+    // Compare digests without leaking the match length through timing
+    private static bool FixedTimeEquals(byte[] a, byte[] b)
     {
         if (a.Length != b.Length) return false;
 
