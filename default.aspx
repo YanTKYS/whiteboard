@@ -2,7 +2,6 @@
 <%@ Import Namespace="System.IO" %>
 <%@ Import Namespace="System.Web.Script.Serialization" %>
 <%@ Import Namespace="System.Collections.Generic" %>
-<%@ Import Namespace="System.Security.Cryptography" %>
 <%@ Import Namespace="System.Text" %>
 <%@ Import Namespace="System.Text.RegularExpressions" %>
 <%@ Import Namespace="System.Globalization" %>
@@ -23,16 +22,16 @@
     private const int EXPIRE_DAYS      = 7;
     private const int AD_CACHE_MINUTES = 60;
 
-    // Floors for the stored admin password material; anything weaker is
-    // treated as misconfiguration and rejected outright.
-    private const int MIN_PBKDF2_ITERATIONS = 100000;
-    private const int MIN_SALT_BYTES        = 16;
-    private const int MIN_HASH_BYTES        = 32;
+    // How long the admin flag is reused for rendering the page. This only
+    // gates whether the Admin toggle is drawn - every delete re-checks AD -
+    // so a stale value costs a useless button, never an unauthorized delete.
+    private const int ADMIN_CACHE_MINUTES = 5;
 
-    // The admin password is never stored in this file. An <appSettings> entry
-    // supplied out-of-band (see secrets.config.sample) holds the PBKDF2
-    // material; when it is absent, admin deletion is simply unavailable.
-    private const string ADMIN_PASSWORD_SETTING = "AdminPassword";
+    // sAMAccountName of the AD group whose members may force-delete notes.
+    // Supplied out-of-band via local.config (see local.config.sample) so the
+    // internal group name stays out of this repository. There is no shared
+    // password: membership in this group is the only grant.
+    private const string ADMIN_GROUP_SETTING = "AdminGroup";
 
     // Single source of truth for the sticky-note colors: the server whitelist,
     // the legend, the filter buttons and the post form are all built from this.
@@ -82,7 +81,13 @@
     }
 
     private static readonly object _logLock = new object();
+
     private void LogError(string source, Exception ex)
+    {
+        WriteLog(source, ex.Message);
+    }
+
+    private void WriteLog(string source, string message)
     {
         try
         {
@@ -90,7 +95,7 @@
             string logFile = Path.Combine(LogFolderPath, DateTime.Now.ToString("yyyyMM", CultureInfo.InvariantCulture) + ".log");
             string entry = string.Format("[{0}] [{1}] {2}: {3}\r\n",
                 DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss", CultureInfo.InvariantCulture),
-                User.Identity.Name, source, ex.Message);
+                User.Identity.Name, source, message);
             lock (_logLock) { File.AppendAllText(logFile, entry, Utf8NoBom); }
         }
         catch { }
@@ -240,54 +245,57 @@
         return displayName;
     }
 
-    // Verify the admin password against the PBKDF2 material in <appSettings>.
-    // Stored form: "<iterations>$<salt-base64>$<hash-base64>" (see README).
-    // A missing, empty or malformed value accepts no password at all, so an
-    // unconfigured deployment loses admin deletion rather than opening it up.
-    private bool IsAdminPassword(string password)
+    // Authoritative admin check: is the caller a member of the configured AD
+    // group? Queried live on every delete, so removing a user from the group
+    // revokes their rights immediately. Any failure - unset group name, user
+    // or group not found, AD unreachable - denies the request; an outage must
+    // never hand out admin rights.
+    private bool IsCurrentUserAdmin()
     {
-        if (string.IsNullOrEmpty(password)) return false;
+        string groupName = WebConfigurationManager.AppSettings[ADMIN_GROUP_SETTING];
+        if (string.IsNullOrEmpty(groupName)) return false;
 
-        string stored = WebConfigurationManager.AppSettings[ADMIN_PASSWORD_SETTING];
-        if (string.IsNullOrEmpty(stored)) return false;
+        string userName = StripDomain(User.Identity.Name);
+        if (string.IsNullOrEmpty(userName)) return false;
 
         try
         {
-            string[] parts = stored.Split('$');
-            if (parts.Length != 3) return false;
-
-            int iterations;
-            if (!int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out iterations)
-                || iterations < MIN_PBKDF2_ITERATIONS) return false;
-
-            byte[] salt = Convert.FromBase64String(parts[1]);
-            byte[] expected = Convert.FromBase64String(parts[2]);
-            if (salt.Length < MIN_SALT_BYTES || expected.Length < MIN_HASH_BYTES) return false;
-
-            // The 3-argument constructor is PBKDF2-HMAC-SHA1; the overload that
-            // selects SHA-256 only exists from .NET Framework 4.7.2 and we
-            // target 4.7, so the iteration count carries the cost here.
-            using (Rfc2898DeriveBytes pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations))
+            using (PrincipalContext ctx = new PrincipalContext(ContextType.Domain))
+            using (UserPrincipal user = UserPrincipal.FindByIdentity(ctx, userName))
+            using (GroupPrincipal group = GroupPrincipal.FindByIdentity(ctx, IdentityType.SamAccountName, groupName))
             {
-                return FixedTimeEquals(pbkdf2.GetBytes(expected.Length), expected);
+                if (group == null)
+                {
+                    // Misconfiguration rather than a denied user - say so once
+                    // per attempt so it is visible in the log.
+                    WriteLog("IsCurrentUserAdmin", "admin group not found in AD: " + groupName);
+                    return false;
+                }
+                if (user == null) return false;
+
+                // Direct membership only; see README on nested groups.
+                return user.IsMemberOf(group);
             }
         }
         catch (Exception ex)
         {
-            // Malformed configuration, not a wrong password - worth recording
-            LogError("IsAdminPassword", ex);
+            LogError("IsCurrentUserAdmin", ex);
             return false;
         }
     }
 
-    // Compare digests without leaking the match length through timing
-    private static bool FixedTimeEquals(byte[] a, byte[] b)
+    // Display-only variant used while rendering the page, to keep an AD round
+    // trip off every page load. Never used to authorize an actual delete.
+    private bool IsCurrentUserAdminCached()
     {
-        if (a.Length != b.Length) return false;
+        string cacheKey = "adminflag_" + User.Identity.Name.ToLowerInvariant();
+        object cached = HttpRuntime.Cache[cacheKey];
+        if (cached is bool) return (bool)cached;
 
-        int diff = 0;
-        for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
-        return diff == 0;
+        bool isAdmin = IsCurrentUserAdmin();
+        HttpRuntime.Cache.Insert(cacheKey, isAdmin, null,
+            DateTime.Now.AddMinutes(ADMIN_CACHE_MINUTES), System.Web.Caching.Cache.NoSlidingExpiration);
+        return isAdmin;
     }
 
     private static Dictionary<string, string> ReadNote(string filePath)
@@ -432,9 +440,9 @@
 
             bool isMine = authorId.Length > 0
                 && authorId.Equals(User.Identity.Name, StringComparison.OrdinalIgnoreCase);
-            bool isAdmin = IsAdminPassword(Request["admin_pass"]);
 
-            if (!isMine && !isAdmin)
+            // Short-circuited: deleting your own note costs no AD round trip
+            if (!isMine && !IsCurrentUserAdmin())
             {
                 Response.StatusCode = 403;
                 WriteError("権限がありません。");
@@ -543,7 +551,6 @@
     button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; font-weight: bold; }
     .btn-cancel { background-color: #f0f0f0; color: #333; }
     .btn-submit { background-color: #0056b3; color: white; }
-    .btn-danger { background-color: #d32f2f; color: white; }
 
     /* ---- Board status messages ---- */
     .board-msg { color: #777; margin: 40px auto; text-align: center; width: 100%; }
@@ -583,7 +590,9 @@
 
     <div id="board"></div>
     <div id="fab-add" title="新規掲示">+</div>
+<% if (IsCurrentUserAdminCached()) { %>
     <div id="admin-mode-toggle" title="管理者削除">Admin</div>
+<% } %>
 
     <div id="modal-post" class="modal-overlay">
         <div class="modal-content">
@@ -614,19 +623,6 @@
                 <span class="btn-hint">Ctrl+Enter で送信</span>
                 <button class="btn-cancel" id="btn-cancel-post">キャンセル</button>
                 <button class="btn-submit" id="btn-save">掲示</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="modal-admin-delete" class="modal-overlay">
-        <div class="modal-content" style="max-width: 400px;">
-            <h3 style="margin-top:0;">管理者強制削除</h3>
-            <p>管理者パスワードを入力してください。</p>
-            <input type="hidden" id="admin-target-id">
-            <div class="form-group"><input type="password" id="admin-pass" placeholder="パスワード"></div>
-            <div class="btn-area">
-                <button class="btn-cancel" id="btn-cancel-admin-delete">キャンセル</button>
-                <button class="btn-danger" id="btn-exec-admin-delete">削除実行</button>
             </div>
         </div>
     </div>
@@ -730,16 +726,14 @@
                 .always(function () { $btn.prop('disabled', false).text('掲示'); });
         });
 
-        // ---- Delete (shared by the owner button and the admin dialog) ----
-        function deleteNote(id, adminPass, onSuccess) {
-            var payload = { id: id };
-            if (adminPass) payload.admin_pass = adminPass;
-
-            apiPost('delete', payload)
+        // ---- Delete (shared by the owner button and admin mode) ----
+        // Admin rights come from the caller's AD group membership, which the
+        // server re-checks on every request, so nothing is sent along here.
+        function deleteNote(id) {
+            apiPost('delete', { id: id })
                 .done(function (res) {
                     var data = parseResponse(res);
                     if (data && data.status === 'success') {
-                        if (onSuccess) onSuccess();
                         loadNotes();
                         showToast('削除しました');
                     } else {
@@ -752,7 +746,7 @@
         $(document).on('click', '.btn-delete-mine', function (e) {
             e.stopPropagation(); // prevent triggering admin-mode note click
             var id = $(this).data('id');
-            if (confirm('この内容を削除しますか？')) deleteNote(id, null, null);
+            if (confirm('この内容を削除しますか？')) deleteNote(id);
         });
 
         // ---- Admin mode ----
@@ -764,18 +758,11 @@
 
         $(document).on('click', '.note', function () {
             if (!adminMode) return;
-            $('#admin-target-id').val($(this).data('id'));
-            $('#admin-pass').val('');
-            openModal('#modal-admin-delete');
-            $('#admin-pass').focus();
-        });
-
-        $('#btn-cancel-admin-delete').on('click', function () { closeModal('#modal-admin-delete'); });
-
-        $('#btn-exec-admin-delete').on('click', function () {
-            deleteNote($('#admin-target-id').val(), $('#admin-pass').val(), function () {
-                closeModal('#modal-admin-delete');
-            });
+            var $note = $(this);
+            if (confirm('管理者権限でこの付箋を削除します。よろしいですか？\n\n'
+                        + $note.find('.note-title').text())) {
+                deleteNote($note.data('id'));
+            }
         });
 
         // ---- Keyboard shortcuts ----

@@ -1,5 +1,5 @@
-# 管理者パスワードのハッシュ値（secrets.config.sample をコピーして作成する）
-secrets.config
+# 環境固有の設定（管理者 AD グループ名。local.config.sample をコピーして作成する）
+local.config
 
 # 投稿データ（社内ユーザー名・AD表示名・伝言本文を含むため絶対にコミットしない）
 data/

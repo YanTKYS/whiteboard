@@ -10,7 +10,7 @@ Windows 認証（Active Directory）によりログインユーザーを自動�
 - **付箋の投稿** : タイトル（50文字以内）・本文（400文字以内）・色（4色）を指定して付箋を掲示板に貼り付ける
 - **自動削除** : 投稿から **7日後** に自動で期限切れ・削除される
 - **本人削除** : 自分が投稿した付箋を削除ボタン（×）で削除できる
-- **管理者削除** : 管理者パスワードで任意の付箋を強制削除できる
+- **管理者削除** : 特定の AD グループのメンバーが任意の付箋を強制削除できる
 - **AD 表示名取得** : Active Directory の表示名（DisplayName）を投稿者名として表示する
 - **ノーキャッシュ** : 常に最新データを取得するよう HTTP キャッシュを無効化
 - **エラーログ** : サーバー側の例外を `logs/yyyyMM.log` に記録
@@ -43,9 +43,9 @@ Windows 認証（Active Directory）によりログインユーザーを自動�
 whiteboard/
 ├── default.aspx          # アプリ本体（サーバーサイド C# + HTML/CSS/JS を一枚に集約）
 ├── web.config            # IIS・ASP.NET 設定ファイル
-├── secrets.config        # 管理者パスワード（リポジトリ管理外・手動作成）
-├── secrets.config.sample # 上記のひな形
-├── .gitignore            # data/ logs/ secrets.config などの誤コミット防止
+├── local.config          # 環境固有設定：管理者ADグループ名（リポジトリ管理外・手動作成）
+├── local.config.sample   # 上記のひな形
+├── .gitignore            # data/ logs/ local.config などの誤コミット防止
 ├── common/
 │   └── jquery-3.6.0.min.js  # jQuery（別途配置が必要）
 ├── data/                 # 投稿データ格納フォルダ（実行時に自動生成）
@@ -68,7 +68,7 @@ IIS の仮想ディレクトリまたはサイトルートに以下を配置し�
 whiteboard/
 ├── default.aspx
 ├── web.config
-├── secrets.config            ← 手順 5 で作成
+├── local.config              ← 手順 5 で作成
 └── common/
     └── jquery-3.6.0.min.js   ← jQuery を別途入手して配置
 ```
@@ -113,19 +113,31 @@ IIS マネージャーで対象サイト／アプリに対して以下を設定�
 [jQuery 公式サイト](https://jquery.com/) または社内ミラーから `jquery-3.6.0.min.js` を入手し、  
 `common/` フォルダに配置してください。
 
-### 5. 管理者パスワードの設定
+### 5. 管理者グループの設定
 
-`secrets.config.sample` を `secrets.config` にコピーし、後述の手順で生成した値を設定します。
+Active Directory に管理者用のセキュリティグループ（例: `Whiteboard-Admins`）を作成し、
+強制削除を許可するユーザーを所属させます。
+
+続いて `local.config.sample` を `local.config` にコピーし、そのグループの
+**sAMAccountName**（ドメイン接頭辞なし）を設定します。
 
 ```
-copy secrets.config.sample secrets.config
+copy local.config.sample local.config
+```
+
+```xml
+<appSettings>
+  <add key="AdminGroup" value="Whiteboard-Admins" />
+</appSettings>
 ```
 
 > [!IMPORTANT]
-> `secrets.config` を作成しない、または値が空のままだと **管理者削除機能は動作しません**
-> （どのパスワードも受け付けない fail-closed 動作）。投稿・閲覧・本人削除は通常どおり動きます。
+> `local.config` を作成しない、値が空、または存在しないグループ名を指定した場合、
+> **管理者削除は誰にも許可されません**（fail-closed）。
+> 投稿・閲覧・本人削除は通常どおり動きます。
 >
-> `secrets.config` は `.gitignore` 済みです。**リポジトリにコミットしないでください。**
+> `local.config` は `.gitignore` 済みです。社内の AD グループ名を公開リポジトリに
+> 含めないための分離なので、**コミットしないでください。**
 
 ---
 
@@ -189,77 +201,35 @@ CSRF 対策として、`action` 付きのリクエストには `X-Requested-With
 
 ---
 
-## 管理者パスワード
+## 管理者権限（強制削除）
 
-管理者削除機能は、画面左下の **Admin** リンクをクリックして管理者モードに切り替えると使用できます。  
-任意の付箋をクリックするとパスワード入力ダイアログが表示されます。
+任意の付箋を強制削除できるのは、`local.config` の `AdminGroup` で指定した
+**AD グループのメンバーだけ**です。共有パスワードは使用しません。
 
-> [!IMPORTANT]
-> **デフォルトパスワードは存在しません。** 管理者削除を使うには、以下の手順で
-> `secrets.config` に値を設定する必要があります。未設定のままだと管理者削除は
-> 常に拒否されます（fail-closed）。
+### 判定の仕組み
 
-### 保存形式
+Windows 認証で識別済みのログインユーザーについて、`UserPrincipal.IsMemberOf()` で
+グループ所属を AD に問い合わせます。
 
-パスワードは **PBKDF2-HMAC-SHA1（ソルト付き・10万回反復）** で導出した値として、
-リポジトリ管理外の `secrets.config` に保存します。ソースコードには一切埋め込みません。
+- **削除リクエストのたびに AD へ問い合わせます。** グループから外した時点で権限は即座に失効します
+- グループ名未設定・グループが存在しない・AD に到達できない場合は、**すべて拒否**します（fail-closed）。AD 障害時に権限が開くことはありません
+- 画面左下の **Admin** リンクは、管理者にのみ表示されます。ただしこれは表示上の制御であり、権限判定はサーバー側で行います（描画時の判定結果のみ 5 分間キャッシュしますが、削除時は必ず再問い合わせします）
 
-```
-<反復回数>$<ソルトBase64>$<ハッシュBase64>
-```
+### 権限の付与・剥奪
 
-| 項目 | 最小要件 |
-|---|---|
-| 反復回数 | 100,000 以上 |
-| ソルト | 16 バイト以上のランダム値 |
-| ハッシュ | 32 バイト以上 |
+AD グループのメンバーを増減させるだけです。`default.aspx` や `local.config` の
+編集、アプリの再起動・再配置は不要です。
 
-いずれかを満たさない値・書式不正の値は、設定ミスとみなして拒否されます。
+### 使い方
 
-### パスワードの設定・変更方法
+1. 画面左下の **Admin** リンクをクリックして管理者削除モードに切り替える（ヘッダーが赤くなります）
+2. 削除したい付箋をクリックし、確認ダイアログで OK を選択する
 
-**1. 値を生成する**（PowerShell / Windows Server 上でそのまま実行できます）
-
-```powershell
-$secure = Read-Host "管理者パスワードを入力" -AsSecureString
-$plain  = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-              [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
-
-$iterations = 100000
-$salt = New-Object byte[] 16
-[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($salt)
-
-$pbkdf2 = New-Object Security.Cryptography.Rfc2898DeriveBytes `
-              -ArgumentList $plain, $salt, $iterations
-$hash = $pbkdf2.GetBytes(32)
-
-"{0}`${1}`${2}" -f $iterations,
-                   [Convert]::ToBase64String($salt),
-                   [Convert]::ToBase64String($hash)
-```
-
-出力例（`$` 区切りの 1 行）:
-
-```
-100000$Yk3v...==$9tQm...=
-```
-
-**2. `secrets.config` に貼り付ける**
-
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<appSettings>
-  <add key="AdminPassword" value="100000$Yk3v...==$9tQm...=" />
-</appSettings>
-```
-
-保存すると ASP.NET がアプリを再起動し、次のリクエストから新しいパスワードが有効になります。
-`default.aspx` の再ビルドや再配置は不要です。
-
-> [!WARNING]
-> 生成した値・元のパスワードを、`web.config` や `default.aspx`、コミットメッセージ、
-> Issue などに書き込まないでください。`secrets.config` は `.gitignore` 済みですが、
-> `git add -f` で強制追加しないよう注意してください。
+> [!NOTE]
+> **入れ子グループについて。** `IsMemberOf()` は直接所属を判定します。
+> 管理者グループに別のグループを入れ子で含めた場合、その配下のユーザーは
+> 管理者として認識されない可能性があります。
+> **管理者ユーザーは `AdminGroup` に直接所属させてください。**
 
 ---
 
@@ -273,6 +243,6 @@ $hash = $pbkdf2.GetBytes(32)
   投稿値はサーバー側で必ず HtmlEncode してから保存・出力しています。
 - 本システムは閉域ネットワーク内での利用を想定しています。インターネット公開環境での使用は想定外です。
 - 投稿内容は HtmlEncode によりエスケープされますが、管理・運用ルールの整備も合わせて実施してください。
-- 管理者パスワードはソルト付き PBKDF2（10万回反復）で `secrets.config` に保持し、リポジトリには含めません。ただし全管理者で共有する単一パスワードであり、試行回数制限もありません。閉域網かつ Windows 認証済みユーザーのみが到達できる前提の簡易保護です。
-- `data/` `logs/` および `secrets.config` は `.gitignore` 済みです。これらには社内ユーザー名・AD 表示名・伝言本文が含まれるため、リポジトリにコミットしないでください。
+- 管理者判定は AD グループの所属で行います。共有パスワードを持たないため、パスワードの漏洩・使い回し・総当たりという経路自体が存在しません。権限の管理は AD 側の運用に一本化されます。
+- `data/` `logs/` および `local.config` は `.gitignore` 済みです。これらには社内ユーザー名・AD 表示名・伝言本文・AD グループ名が含まれるため、リポジトリにコミットしないでください。
 - `web.config` で `<deny users="?" />` を設定し、IIS 側の認証設定と二重に未認証アクセスを遮断しています。IIS で Windows 認証が有効になっていない場合は起動時に構成エラーとなります（フェイルクローズ）。
