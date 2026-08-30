@@ -10,7 +10,7 @@ Windows 認証（Active Directory）によりログインユーザーを自動�
 - **付箋の投稿** : タイトル（50文字以内）・本文（400文字以内）・色（4色）を指定して付箋を掲示板に貼り付ける
 - **自動削除** : 投稿から **7日後** に自動で期限切れ・削除される
 - **本人削除** : 自分が投稿した付箋を削除ボタン（×）で削除できる
-- **管理者削除** : 管理者パスワードで任意の付箋を強制削除できる
+- **管理者削除** : 特定の AD グループのメンバーが任意の付箋を強制削除できる
 - **AD 表示名取得** : Active Directory の表示名（DisplayName）を投稿者名として表示する
 - **ノーキャッシュ** : 常に最新データを取得するよう HTTP キャッシュを無効化
 - **エラーログ** : サーバー側の例外を `logs/yyyyMM.log` に記録
@@ -43,6 +43,9 @@ Windows 認証（Active Directory）によりログインユーザーを自動�
 whiteboard/
 ├── default.aspx          # アプリ本体（サーバーサイド C# + HTML/CSS/JS を一枚に集約）
 ├── web.config            # IIS・ASP.NET 設定ファイル
+├── local.config          # 環境固有設定：管理者ADグループ名（リポジトリ管理外・手動作成）
+├── local.config.sample   # 上記のひな形
+├── .gitignore            # data/ logs/ local.config などの誤コミット防止
 ├── common/
 │   └── jquery-3.6.0.min.js  # jQuery（別途配置が必要）
 ├── data/                 # 投稿データ格納フォルダ（実行時に自動生成）
@@ -65,6 +68,7 @@ IIS の仮想ディレクトリまたはサイトルートに以下を配置し�
 whiteboard/
 ├── default.aspx
 ├── web.config
+├── local.config              ← 手順 5 で作成
 └── common/
     └── jquery-3.6.0.min.js   ← jQuery を別途入手して配置
 ```
@@ -109,6 +113,32 @@ IIS マネージャーで対象サイト／アプリに対して以下を設定�
 [jQuery 公式サイト](https://jquery.com/) または社内ミラーから `jquery-3.6.0.min.js` を入手し、  
 `common/` フォルダに配置してください。
 
+### 5. 管理者グループの設定
+
+Active Directory に管理者用のセキュリティグループ（例: `Whiteboard-Admins`）を作成し、
+強制削除を許可するユーザーを所属させます。
+
+続いて `local.config.sample` を `local.config` にコピーし、そのグループの
+**sAMAccountName**（ドメイン接頭辞なし）を設定します。
+
+```
+copy local.config.sample local.config
+```
+
+```xml
+<appSettings>
+  <add key="AdminGroup" value="Whiteboard-Admins" />
+</appSettings>
+```
+
+> [!IMPORTANT]
+> `local.config` を作成しない、値が空、または存在しないグループ名を指定した場合、
+> **管理者削除は誰にも許可されません**（fail-closed）。
+> 投稿・閲覧・本人削除は通常どおり動きます。
+>
+> `local.config` は `.gitignore` 済みです。社内の AD グループ名を公開リポジトリに
+> 含めないための分離なので、**コミットしないでください。**
+
 ---
 
 ## データ仕様
@@ -124,13 +154,19 @@ yyyyMMdd_<GUID>.json
 ファイル名の先頭 8 桁が **有効期限（年月日）** です。  
 ページ読み込み時に期限切れファイルは自動的に削除されます。
 
+> [!NOTE]
+> **投稿内容は平文で保存されます。** HTML エスケープは保存時ではなく描画時に、
+> 描画先のコンテキストに応じて行います（テキストノード／属性値）。
+> これにより、`data/` の JSON を直接編集・改竄しても、その内容が
+> HTML として解釈されることはありません。
+
 ### JSON スキーマ
 
 ```json
 {
   "id": "20251231_xxxx-xxxx-xxxx.json",
-  "title": "タイトル（HTMLエンコード済み）",
-  "body": "本文（HTMLエンコード済み・改行は<br>変換済み）",
+  "title": "タイトル（平文）",
+  "body": "本文（平文・改行は \\n のまま）",
   "color": "yellow | blue | red | green",
   "author_id": "DOMAIN\\username",
   "author_name": "AD表示名",
@@ -171,33 +207,35 @@ CSRF 対策として、`action` 付きのリクエストには `X-Requested-With
 
 ---
 
-## 管理者パスワード
+## 管理者権限（強制削除）
 
-管理者削除機能は、画面左下の **Admin** リンクをクリックして管理者モードに切り替えると使用できます。  
-任意の付箋をクリックするとパスワード入力ダイアログが表示されます。
+任意の付箋を強制削除できるのは、`local.config` の `AdminGroup` で指定した
+**AD グループのメンバーだけ**です。共有パスワードは使用しません。
 
-### デフォルトパスワード
+### 判定の仕組み
 
-```
-admin9999
-```
+Windows 認証で識別済みのログインユーザーについて、`UserPrincipal.IsMemberOf()` で
+グループ所属を AD に問い合わせます。
 
-### パスワードの変更方法
+- **削除リクエストのたびに AD へ問い合わせます。** グループから外した時点で権限は即座に失効します
+- グループ名未設定・グループが存在しない・AD に到達できない場合は、**すべて拒否**します（fail-closed）。AD 障害時に権限が開くことはありません
+- 画面左下の **Admin** リンクは、管理者にのみ表示されます。ただしこれは表示上の制御であり、権限判定はサーバー側で行います（描画時の判定結果のみ 5 分間キャッシュしますが、削除時は必ず再問い合わせします）
 
-`default.aspx` 冒頭の以下の定数を、新しいパスワードの **SHA-256 ハッシュ値**（小文字16進数）に置き換えます。
+### 権限の付与・剥奪
 
-```csharp
-private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272";
-```
+AD グループのメンバーを増減させるだけです。`default.aspx` や `local.config` の
+編集、アプリの再起動・再配置は不要です。
 
-SHA-256 ハッシュの生成例（PowerShell）:
+### 使い方
 
-```powershell
-$pass = "新しいパスワード"
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($pass)
-$hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
-($hash | ForEach-Object { $_.ToString("x2") }) -join ""
-```
+1. 画面左下の **Admin** リンクをクリックして管理者削除モードに切り替える（ヘッダーが赤くなります）
+2. 削除したい付箋をクリックし、確認ダイアログで OK を選択する
+
+> [!NOTE]
+> **入れ子グループについて。** `IsMemberOf()` は直接所属を判定します。
+> 管理者グループに別のグループを入れ子で含めた場合、その配下のユーザーは
+> 管理者として認識されない可能性があります。
+> **管理者ユーザーは `AdminGroup` に直接所属させてください。**
 
 ---
 
@@ -207,8 +245,14 @@ $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
 - `web.config` の `debug` は既定で `false`（本番向け）です。開発・検証時のみ `true` に変更してください。
 - `customErrors mode` は既定で `RemoteOnly`（サーバー上のブラウザからのみエラー詳細を表示）です。
 - `default.aspx` は `ValidateRequest="false"`（+ `web.config` の `requestValidationMode="2.0"`）で動作します。
-  「10<20」のように `<` を含む投稿を ASP.NET の要求検証エラーにしないための設定で、
-  投稿値はサーバー側で必ず HtmlEncode してから保存・出力しています。
+  「10<20」のように `<` を含む投稿を ASP.NET の要求検証エラーにしないための設定です。
+  投稿値は平文で保存し、描画時にコンテキストに応じてエスケープします。
 - 本システムは閉域ネットワーク内での利用を想定しています。インターネット公開環境での使用は想定外です。
-- 投稿内容は HtmlEncode によりエスケープされますが、管理・運用ルールの整備も合わせて実施してください。
-- 管理者パスワードはソルトなしの SHA-256 ハッシュで保持しています。閉域網の簡易保護であり、強度の高い認証機構ではありません。
+- 投稿内容は描画時にエスケープされますが、管理・運用ルールの整備も合わせて実施してください。
+- レスポンスに以下のセキュリティヘッダーを付与しています。
+  - `Content-Security-Policy` : `default-src 'none'` を基点に、自サイトのスクリプトとリクエスト毎の nonce を持つインラインブロックのみ実行を許可します。万一エスケープを迂回されても、注入されたスクリプトは実行されません
+  - `X-Frame-Options: DENY` : 削除操作を狙ったクリックジャッキングを防ぎます（CSP の `frame-ancestors 'none'` の後方互換）
+  - `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer`
+- 管理者判定は AD グループの所属で行います。共有パスワードを持たないため、パスワードの漏洩・使い回し・総当たりという経路自体が存在しません。権限の管理は AD 側の運用に一本化されます。
+- `data/` `logs/` および `local.config` は `.gitignore` 済みです。これらには社内ユーザー名・AD 表示名・伝言本文・AD グループ名が含まれるため、リポジトリにコミットしないでください。
+- `web.config` で `<deny users="?" />` を設定し、IIS 側の認証設定と二重に未認証アクセスを遮断しています。IIS で Windows 認証が有効になっていない場合は起動時に構成エラーとなります（フェイルクローズ）。

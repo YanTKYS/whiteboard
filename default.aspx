@@ -2,10 +2,11 @@
 <%@ Import Namespace="System.IO" %>
 <%@ Import Namespace="System.Web.Script.Serialization" %>
 <%@ Import Namespace="System.Collections.Generic" %>
-<%@ Import Namespace="System.Security.Cryptography" %>
 <%@ Import Namespace="System.Text" %>
 <%@ Import Namespace="System.Text.RegularExpressions" %>
+<%@ Import Namespace="System.Security.Cryptography" %>
 <%@ Import Namespace="System.Globalization" %>
+<%@ Import Namespace="System.Web.Configuration" %>
 <%-- Import AD library --%>
 <%@ Import Namespace="System.DirectoryServices.AccountManagement" %>
 
@@ -14,16 +15,25 @@
     // Server-side code (C#)
     // ==========================================
     // Note: ValidateRequest is disabled because notes may legitimately contain
-    // "<" or "&". Every stored value is HtmlEncode()d on save and the only other
-    // input (the note id) is matched against NoteIdPattern before touching disk.
+    // "<" or "&". Notes are stored as plain text and escaped at render time, in
+    // whichever context they are rendered into; the only other input (the note
+    // id) is matched against NoteIdPattern before touching disk.
 
     private const int TITLE_MAX_LENGTH = 50;
     private const int BODY_MAX_LENGTH  = 400;
     private const int EXPIRE_DAYS      = 7;
     private const int AD_CACHE_MINUTES = 60;
 
-    // Admin password hash (plain: admin9999)
-    private const string MASTER_PASS_HASH = "240be518fabd2724ddb6f04eebdd92bd6073057426a7013d8519520743b08272";
+    // How long the admin flag is reused for rendering the page. This only
+    // gates whether the Admin toggle is drawn - every delete re-checks AD -
+    // so a stale value costs a useless button, never an unauthorized delete.
+    private const int ADMIN_CACHE_MINUTES = 5;
+
+    // sAMAccountName of the AD group whose members may force-delete notes.
+    // Supplied out-of-band via local.config (see local.config.sample) so the
+    // internal group name stays out of this repository. There is no shared
+    // password: membership in this group is the only grant.
+    private const string ADMIN_GROUP_SETTING = "AdminGroup";
 
     // Single source of truth for the sticky-note colors: the server whitelist,
     // the legend, the filter buttons and the post form are all built from this.
@@ -73,7 +83,13 @@
     }
 
     private static readonly object _logLock = new object();
+
     private void LogError(string source, Exception ex)
+    {
+        WriteLog(source, ex.Message);
+    }
+
+    private void WriteLog(string source, string message)
     {
         try
         {
@@ -81,15 +97,57 @@
             string logFile = Path.Combine(LogFolderPath, DateTime.Now.ToString("yyyyMM", CultureInfo.InvariantCulture) + ".log");
             string entry = string.Format("[{0}] [{1}] {2}: {3}\r\n",
                 DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss", CultureInfo.InvariantCulture),
-                User.Identity.Name, source, ex.Message);
+                User.Identity.Name, source, message);
             lock (_logLock) { File.AppendAllText(logFile, entry, Utf8NoBom); }
         }
         catch { }
     }
 
+    // One CSP nonce per request, shared by the inline <style> and <script>
+    // blocks. Lazily generated so it is only paid for when the page renders.
+    private string _cspNonce;
+    protected string CspNonce
+    {
+        get
+        {
+            if (_cspNonce == null)
+            {
+                byte[] bytes = new byte[16];
+                using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+                _cspNonce = Convert.ToBase64String(bytes);
+            }
+            return _cspNonce;
+        }
+    }
+
+    // The app loads no third-party resources, has no <form>, no images and is
+    // never framed, so everything but our own script and style is denied.
+    // Only the two blocks carrying this request's nonce may execute, which
+    // means injected markup cannot run even if it reaches the page.
+    private void SetSecurityHeaders()
+    {
+        string nonce = "'nonce-" + CspNonce + "'";
+        Response.AppendHeader("Content-Security-Policy",
+            "default-src 'none'; "
+            + "script-src 'self' " + nonce + "; "
+            + "style-src " + nonce + "; "
+            + "connect-src 'self'; "
+            // No images are used; 'self' only keeps the browser's automatic
+            // /favicon.ico probe from logging a CSP violation.
+            + "img-src 'self'; "
+            + "form-action 'none'; "
+            + "frame-ancestors 'none'; "
+            + "base-uri 'none'");
+        // For browsers predating frame-ancestors
+        Response.AppendHeader("X-Frame-Options", "DENY");
+        Response.AppendHeader("X-Content-Type-Options", "nosniff");
+        Response.AppendHeader("Referrer-Policy", "no-referrer");
+    }
+
     protected void Page_Load(object sender, EventArgs e)
     {
         Response.Cache.SetCacheability(HttpCacheability.NoCache);
+        SetSecurityHeaders();
 
         // Reject unauthenticated requests
         if (!User.Identity.IsAuthenticated)
@@ -231,32 +289,57 @@
         return displayName;
     }
 
-    // SHA-256 hash helper
-    private static string ComputeSha256Hash(string rawData)
+    // Authoritative admin check: is the caller a member of the configured AD
+    // group? Queried live on every delete, so removing a user from the group
+    // revokes their rights immediately. Any failure - unset group name, user
+    // or group not found, AD unreachable - denies the request; an outage must
+    // never hand out admin rights.
+    private bool IsCurrentUserAdmin()
     {
-        using (SHA256 sha256Hash = SHA256.Create())
+        string groupName = WebConfigurationManager.AppSettings[ADMIN_GROUP_SETTING];
+        if (string.IsNullOrEmpty(groupName)) return false;
+
+        string userName = StripDomain(User.Identity.Name);
+        if (string.IsNullOrEmpty(userName)) return false;
+
+        try
         {
-            byte[] bytes = sha256Hash.ComputeHash(Encoding.UTF8.GetBytes(rawData));
-            StringBuilder builder = new StringBuilder(bytes.Length * 2);
-            for (int i = 0; i < bytes.Length; i++) builder.Append(bytes[i].ToString("x2"));
-            return builder.ToString();
+            using (PrincipalContext ctx = new PrincipalContext(ContextType.Domain))
+            using (UserPrincipal user = UserPrincipal.FindByIdentity(ctx, userName))
+            using (GroupPrincipal group = GroupPrincipal.FindByIdentity(ctx, IdentityType.SamAccountName, groupName))
+            {
+                if (group == null)
+                {
+                    // Misconfiguration rather than a denied user - say so once
+                    // per attempt so it is visible in the log.
+                    WriteLog("IsCurrentUserAdmin", "admin group not found in AD: " + groupName);
+                    return false;
+                }
+                if (user == null) return false;
+
+                // Direct membership only; see README on nested groups.
+                return user.IsMemberOf(group);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError("IsCurrentUserAdmin", ex);
+            return false;
         }
     }
 
-    private static bool IsAdminPassword(string password)
+    // Display-only variant used while rendering the page, to keep an AD round
+    // trip off every page load. Never used to authorize an actual delete.
+    private bool IsCurrentUserAdminCached()
     {
-        if (string.IsNullOrEmpty(password)) return false;
-        return FixedTimeEquals(ComputeSha256Hash(password), MASTER_PASS_HASH);
-    }
+        string cacheKey = "adminflag_" + User.Identity.Name.ToLowerInvariant();
+        object cached = HttpRuntime.Cache[cacheKey];
+        if (cached is bool) return (bool)cached;
 
-    // Compare hex digests without leaking the match length through timing
-    private static bool FixedTimeEquals(string a, string b)
-    {
-        if (a.Length != b.Length) return false;
-
-        int diff = 0;
-        for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
-        return diff == 0;
+        bool isAdmin = IsCurrentUserAdmin();
+        HttpRuntime.Cache.Insert(cacheKey, isAdmin, null,
+            DateTime.Now.AddMinutes(ADMIN_CACHE_MINUTES), System.Web.Caching.Cache.NoSlidingExpiration);
+        return isAdmin;
     }
 
     private static Dictionary<string, string> ReadNote(string filePath)
@@ -291,8 +374,10 @@
             string currentUserId = User.Identity.Name;
             string displayName = GetAdDisplayName(currentUserId);
 
-            title = HttpUtility.HtmlEncode(title);
-            body = HttpUtility.HtmlEncode(body).Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "<br>");
+            // Stored as plain text - no HTML encoding and no <br> here. The
+            // client escapes at render time, so the data file never holds
+            // markup that something downstream might be tempted to trust.
+            body = body.Replace("\r\n", "\n").Replace("\r", "\n");
 
             DateTime now = DateTime.Now;
             DateTime expireDate = now.AddDays(EXPIRE_DAYS);
@@ -401,9 +486,9 @@
 
             bool isMine = authorId.Length > 0
                 && authorId.Equals(User.Identity.Name, StringComparison.OrdinalIgnoreCase);
-            bool isAdmin = IsAdminPassword(Request["admin_pass"]);
 
-            if (!isMine && !isAdmin)
+            // Short-circuited: deleting your own note costs no AD round trip
+            if (!isMine && !IsCurrentUserAdmin())
             {
                 Response.StatusCode = 403;
                 WriteError("権限がありません。");
@@ -429,7 +514,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ほわいとぼーど - 伝言板</title>
 <script src="./common/jquery-3.6.0.min.js"></script>
-<style>
+<style nonce="<%= CspNonce %>">
     /* ---- Base ---- */
     body { font-family: "Meiryo UI", sans-serif; background-color: #f4f7f6; margin: 0; color: #333; }
 
@@ -500,6 +585,8 @@
     /* ---- Modal ---- */
     .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); z-index: 200; justify-content: center; align-items: center; }
     .modal-content { background-color: white; width: 90%; max-width: 500px; padding: 25px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+    .modal-content h3 { margin-top: 0; }
+    .modal-caution { font-size: 0.85rem; color: #d32f2f; background: #ffebee; padding: 5px; border-radius: 4px; }
     .form-group { margin-bottom: 15px; }
     label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 0.9rem; }
     .field-footer { display: flex; justify-content: flex-end; margin-top: 3px; }
@@ -512,7 +599,6 @@
     button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; font-weight: bold; }
     .btn-cancel { background-color: #f0f0f0; color: #333; }
     .btn-submit { background-color: #0056b3; color: white; }
-    .btn-danger { background-color: #d32f2f; color: white; }
 
     /* ---- Board status messages ---- */
     .board-msg { color: #777; margin: 40px auto; text-align: center; width: 100%; }
@@ -552,12 +638,14 @@
 
     <div id="board"></div>
     <div id="fab-add" title="新規掲示">+</div>
+<% if (IsCurrentUserAdminCached()) { %>
     <div id="admin-mode-toggle" title="管理者削除">Admin</div>
+<% } %>
 
     <div id="modal-post" class="modal-overlay">
         <div class="modal-content">
-            <h3 style="margin-top:0;">新規掲示付け</h3>
-            <p style="font-size:0.85rem; color:#d32f2f; background:#ffebee; padding:5px; border-radius:4px;">
+            <h3>新規掲示付け</h3>
+            <p class="modal-caution">
                 誰でも見られる場所に内容を貼ります。<br>
                 内容は<%= EXPIRE_DAYS.ToString() %>日後に自動的に削除されます。
             </p>
@@ -587,22 +675,9 @@
         </div>
     </div>
 
-    <div id="modal-admin-delete" class="modal-overlay">
-        <div class="modal-content" style="max-width: 400px;">
-            <h3 style="margin-top:0;">管理者強制削除</h3>
-            <p>管理者パスワードを入力してください。</p>
-            <input type="hidden" id="admin-target-id">
-            <div class="form-group"><input type="password" id="admin-pass" placeholder="パスワード"></div>
-            <div class="btn-area">
-                <button class="btn-cancel" id="btn-cancel-admin-delete">キャンセル</button>
-                <button class="btn-danger" id="btn-exec-admin-delete">削除実行</button>
-            </div>
-        </div>
-    </div>
-
     <div id="toast-container"></div>
 
-<script>
+<script nonce="<%= CspNonce %>">
     $(document).ready(function () {
         var API = 'default.aspx';
         var TITLE_MAX = <%= TITLE_MAX_LENGTH.ToString() %>, BODY_MAX = <%= BODY_MAX_LENGTH.ToString() %>;
@@ -699,16 +774,14 @@
                 .always(function () { $btn.prop('disabled', false).text('掲示'); });
         });
 
-        // ---- Delete (shared by the owner button and the admin dialog) ----
-        function deleteNote(id, adminPass, onSuccess) {
-            var payload = { id: id };
-            if (adminPass) payload.admin_pass = adminPass;
-
-            apiPost('delete', payload)
+        // ---- Delete (shared by the owner button and admin mode) ----
+        // Admin rights come from the caller's AD group membership, which the
+        // server re-checks on every request, so nothing is sent along here.
+        function deleteNote(id) {
+            apiPost('delete', { id: id })
                 .done(function (res) {
                     var data = parseResponse(res);
                     if (data && data.status === 'success') {
-                        if (onSuccess) onSuccess();
                         loadNotes();
                         showToast('削除しました');
                     } else {
@@ -721,7 +794,7 @@
         $(document).on('click', '.btn-delete-mine', function (e) {
             e.stopPropagation(); // prevent triggering admin-mode note click
             var id = $(this).data('id');
-            if (confirm('この内容を削除しますか？')) deleteNote(id, null, null);
+            if (confirm('この内容を削除しますか？')) deleteNote(id);
         });
 
         // ---- Admin mode ----
@@ -733,18 +806,11 @@
 
         $(document).on('click', '.note', function () {
             if (!adminMode) return;
-            $('#admin-target-id').val($(this).data('id'));
-            $('#admin-pass').val('');
-            openModal('#modal-admin-delete');
-            $('#admin-pass').focus();
-        });
-
-        $('#btn-cancel-admin-delete').on('click', function () { closeModal('#modal-admin-delete'); });
-
-        $('#btn-exec-admin-delete').on('click', function () {
-            deleteNote($('#admin-target-id').val(), $('#admin-pass').val(), function () {
-                closeModal('#modal-admin-delete');
-            });
+            var $note = $(this);
+            if (confirm('管理者権限でこの付箋を削除します。よろしいですか？\n\n'
+                        + $note.find('.note-title').text())) {
+                deleteNote($note.data('id'));
+            }
         });
 
         // ---- Keyboard shortcuts ----
@@ -814,14 +880,18 @@
                 ? '<div class="btn-delete-mine" data-id="' + escapeHtml(item.id) + '" title="削除">&times;</div>'
                 : '';
 
-            // title / body are stored HTML-encoded by the server, so they go in
-            // as-is; everything else is escaped here.
+            // Notes are stored as plain text, so everything is escaped here.
+            // Newlines become <br> only after escaping, which is why no markup
+            // can survive out of a data file.
+            var title = escapeHtml(item.title);
+            var body = escapeHtml(item.body).replace(/\n/g, '<br>');
+
             return '' +
                 '<div class="note ' + escapeHtml(item.color) + (expiringSoon ? ' expiring-soon' : '') + '" data-id="' + escapeHtml(item.id) + '">' +
                     deleteBtn +
                     '<div class="note-meta"><span>' + escapeHtml(item.post_date) + '</span><span>掲載期限：' + escapeHtml(item.expire_disp) + '</span></div>' +
-                    '<div class="note-title" title="' + item.title + '">' + item.title + '</div>' +
-                    '<div class="note-body">' + item.body + '</div>' +
+                    '<div class="note-title" title="' + title + '">' + title + '</div>' +
+                    '<div class="note-body">' + body + '</div>' +
                     '<div class="note-footer">' + expiryBadge + '<div class="note-author">by ' + escapeHtml(item.author_disp) + '</div></div>' +
                 '</div>';
         }

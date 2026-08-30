@@ -1,0 +1,16 @@
+# 環境固有の設定（管理者 AD グループ名。local.config.sample をコピーして作成する）
+local.config
+
+# 投稿データ（社内ユーザー名・AD表示名・伝言本文を含むため絶対にコミットしない）
+data/
+
+# エラーログ（ユーザー名・例外メッセージを含む）
+logs/
+
+# 別途入手して配置する jQuery
+common/jquery-*.js
+
+# Visual Studio / IIS の作業ファイル
+*.suo
+*.user
+.vs/

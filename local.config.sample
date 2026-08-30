@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  このファイルを local.config にコピーして、環境固有の値を設定してください。
+  local.config は .gitignore 済みで、リポジトリにはコミットされません。
+  社内の AD グループ名を公開リポジトリに含めないための分離です。
+
+  AdminGroup:
+    付箋を強制削除できる管理者グループの sAMAccountName を指定します
+    （ドメイン接頭辞なし。例: Whiteboard-Admins）。
+    アプリサーバーと同一ドメイン上のグループである必要があります。
+
+    未設定・空・存在しないグループ名の場合、管理者削除は誰にも許可されません
+    （fail-closed）。投稿・閲覧・本人削除は通常どおり動作します。
+-->
+<appSettings>
+  <add key="AdminGroup" value="" />
+</appSettings>
