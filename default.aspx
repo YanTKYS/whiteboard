@@ -4,6 +4,7 @@
 <%@ Import Namespace="System.Collections.Generic" %>
 <%@ Import Namespace="System.Text" %>
 <%@ Import Namespace="System.Text.RegularExpressions" %>
+<%@ Import Namespace="System.Security.Cryptography" %>
 <%@ Import Namespace="System.Globalization" %>
 <%@ Import Namespace="System.Web.Configuration" %>
 <%-- Import AD library --%>
@@ -14,8 +15,9 @@
     // Server-side code (C#)
     // ==========================================
     // Note: ValidateRequest is disabled because notes may legitimately contain
-    // "<" or "&". Every stored value is HtmlEncode()d on save and the only other
-    // input (the note id) is matched against NoteIdPattern before touching disk.
+    // "<" or "&". Notes are stored as plain text and escaped at render time, in
+    // whichever context they are rendered into; the only other input (the note
+    // id) is matched against NoteIdPattern before touching disk.
 
     private const int TITLE_MAX_LENGTH = 50;
     private const int BODY_MAX_LENGTH  = 400;
@@ -101,9 +103,51 @@
         catch { }
     }
 
+    // One CSP nonce per request, shared by the inline <style> and <script>
+    // blocks. Lazily generated so it is only paid for when the page renders.
+    private string _cspNonce;
+    protected string CspNonce
+    {
+        get
+        {
+            if (_cspNonce == null)
+            {
+                byte[] bytes = new byte[16];
+                using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+                _cspNonce = Convert.ToBase64String(bytes);
+            }
+            return _cspNonce;
+        }
+    }
+
+    // The app loads no third-party resources, has no <form>, no images and is
+    // never framed, so everything but our own script and style is denied.
+    // Only the two blocks carrying this request's nonce may execute, which
+    // means injected markup cannot run even if it reaches the page.
+    private void SetSecurityHeaders()
+    {
+        string nonce = "'nonce-" + CspNonce + "'";
+        Response.AppendHeader("Content-Security-Policy",
+            "default-src 'none'; "
+            + "script-src 'self' " + nonce + "; "
+            + "style-src " + nonce + "; "
+            + "connect-src 'self'; "
+            // No images are used; 'self' only keeps the browser's automatic
+            // /favicon.ico probe from logging a CSP violation.
+            + "img-src 'self'; "
+            + "form-action 'none'; "
+            + "frame-ancestors 'none'; "
+            + "base-uri 'none'");
+        // For browsers predating frame-ancestors
+        Response.AppendHeader("X-Frame-Options", "DENY");
+        Response.AppendHeader("X-Content-Type-Options", "nosniff");
+        Response.AppendHeader("Referrer-Policy", "no-referrer");
+    }
+
     protected void Page_Load(object sender, EventArgs e)
     {
         Response.Cache.SetCacheability(HttpCacheability.NoCache);
+        SetSecurityHeaders();
 
         // Reject unauthenticated requests
         if (!User.Identity.IsAuthenticated)
@@ -330,8 +374,10 @@
             string currentUserId = User.Identity.Name;
             string displayName = GetAdDisplayName(currentUserId);
 
-            title = HttpUtility.HtmlEncode(title);
-            body = HttpUtility.HtmlEncode(body).Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "<br>");
+            // Stored as plain text - no HTML encoding and no <br> here. The
+            // client escapes at render time, so the data file never holds
+            // markup that something downstream might be tempted to trust.
+            body = body.Replace("\r\n", "\n").Replace("\r", "\n");
 
             DateTime now = DateTime.Now;
             DateTime expireDate = now.AddDays(EXPIRE_DAYS);
@@ -468,7 +514,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ほわいとぼーど - 伝言板</title>
 <script src="./common/jquery-3.6.0.min.js"></script>
-<style>
+<style nonce="<%= CspNonce %>">
     /* ---- Base ---- */
     body { font-family: "Meiryo UI", sans-serif; background-color: #f4f7f6; margin: 0; color: #333; }
 
@@ -539,6 +585,8 @@
     /* ---- Modal ---- */
     .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); z-index: 200; justify-content: center; align-items: center; }
     .modal-content { background-color: white; width: 90%; max-width: 500px; padding: 25px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+    .modal-content h3 { margin-top: 0; }
+    .modal-caution { font-size: 0.85rem; color: #d32f2f; background: #ffebee; padding: 5px; border-radius: 4px; }
     .form-group { margin-bottom: 15px; }
     label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 0.9rem; }
     .field-footer { display: flex; justify-content: flex-end; margin-top: 3px; }
@@ -596,8 +644,8 @@
 
     <div id="modal-post" class="modal-overlay">
         <div class="modal-content">
-            <h3 style="margin-top:0;">新規掲示付け</h3>
-            <p style="font-size:0.85rem; color:#d32f2f; background:#ffebee; padding:5px; border-radius:4px;">
+            <h3>新規掲示付け</h3>
+            <p class="modal-caution">
                 誰でも見られる場所に内容を貼ります。<br>
                 内容は<%= EXPIRE_DAYS.ToString() %>日後に自動的に削除されます。
             </p>
@@ -629,7 +677,7 @@
 
     <div id="toast-container"></div>
 
-<script>
+<script nonce="<%= CspNonce %>">
     $(document).ready(function () {
         var API = 'default.aspx';
         var TITLE_MAX = <%= TITLE_MAX_LENGTH.ToString() %>, BODY_MAX = <%= BODY_MAX_LENGTH.ToString() %>;
@@ -832,14 +880,18 @@
                 ? '<div class="btn-delete-mine" data-id="' + escapeHtml(item.id) + '" title="削除">&times;</div>'
                 : '';
 
-            // title / body are stored HTML-encoded by the server, so they go in
-            // as-is; everything else is escaped here.
+            // Notes are stored as plain text, so everything is escaped here.
+            // Newlines become <br> only after escaping, which is why no markup
+            // can survive out of a data file.
+            var title = escapeHtml(item.title);
+            var body = escapeHtml(item.body).replace(/\n/g, '<br>');
+
             return '' +
                 '<div class="note ' + escapeHtml(item.color) + (expiringSoon ? ' expiring-soon' : '') + '" data-id="' + escapeHtml(item.id) + '">' +
                     deleteBtn +
                     '<div class="note-meta"><span>' + escapeHtml(item.post_date) + '</span><span>掲載期限：' + escapeHtml(item.expire_disp) + '</span></div>' +
-                    '<div class="note-title" title="' + item.title + '">' + item.title + '</div>' +
-                    '<div class="note-body">' + item.body + '</div>' +
+                    '<div class="note-title" title="' + title + '">' + title + '</div>' +
+                    '<div class="note-body">' + body + '</div>' +
                     '<div class="note-footer">' + expiryBadge + '<div class="note-author">by ' + escapeHtml(item.author_disp) + '</div></div>' +
                 '</div>';
         }
