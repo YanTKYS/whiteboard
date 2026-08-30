@@ -77,21 +77,16 @@ whiteboard/
 > IIS の実行アカウント（アプリプールのユーザー）に、アプリのルートフォルダへの **書き込み権限** が必要です
 > （`data/` `logs/` の自動生成に使用します）。
 
-> [!WARNING]
-> **`default.aspx` は配置前に Shift-JIS へ変換してください。**  
-> 本リポジトリのファイルは UTF-8 で管理していますが、IIS（ASP.NET）は ASPX ファイルを
-> Shift-JIS（CP932）として解釈するため、UTF-8 のまま配置するとコンパイルエラーが発生します。
+> [!NOTE]
+> **ファイルは UTF-8 のまま配置してください。文字コードの変換は不要です。**  
+> `web.config` の `<globalization fileEncoding="utf-8" />` で ASPX の文字コードを
+> 明示しているため、リポジトリのファイルをそのままコピーするだけで動作します。
 >
-> 変換例（PowerShell）:
-> ```powershell
-> $content = [System.IO.File]::ReadAllText("default.aspx", [System.Text.Encoding]::UTF8)
-> [System.IO.File]::WriteAllText("default.aspx", $content, [System.Text.Encoding]::GetEncoding("shift_jis"))
-> ```
+> この指定がないと、ASP.NET はサーバーの既定コードページ（日本語 Windows では
+> Shift-JIS）で解釈するため、文字化けやコンパイルエラーが発生します。
 >
-> 変換例（iconv / Linux・Mac）:
-> ```bash
-> iconv -f UTF-8 -t SHIFT_JIS default.aspx > default_sjis.aspx
-> ```
+> 以前のバージョンで `default.aspx` を Shift-JIS に変換して配置していた場合は、
+> **`default.aspx` と `web.config` を必ずセットで差し替えてください。**
 
 ### 2. IIS の認証設定
 
@@ -241,7 +236,7 @@ AD グループのメンバーを増減させるだけです。`default.aspx` �
 
 ## 注意事項
 
-- **`default.aspx` は IIS 配置前に Shift-JIS へ変換すること。** リポジトリは UTF-8 で管理しているが、IIS（ASP.NET）は Shift-JIS を要求するためコンパイルエラーになる（「セットアップ手順 1」参照）。
+- **ファイルは UTF-8 のまま配置すること。** `web.config` の `<globalization fileEncoding="utf-8" />` で ASPX の文字コードを明示しているため、変換は不要（「セットアップ手順 1」参照）。
 - `web.config` の `debug` は既定で `false`（本番向け）です。開発・検証時のみ `true` に変更してください。
 - `customErrors mode` は既定で `RemoteOnly`（サーバー上のブラウザからのみエラー詳細を表示）です。
 - `default.aspx` は `ValidateRequest="false"`（+ `web.config` の `requestValidationMode="2.0"`）で動作します。

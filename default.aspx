@@ -567,7 +567,7 @@
     .btn-delete-mine:hover { background: #f44336; color: white; }
 
     /* ---- Loading ---- */
-    .loading-msg { color: #aaa; margin: 40px auto; text-align: center; width: 100%; font-size: 0.95rem; animation: pulse 1.4s ease-in-out infinite; }
+    .loading-msg { grid-column: 1 / -1; color: #aaa; margin: 40px auto; text-align: center; width: 100%; font-size: 0.95rem; animation: pulse 1.4s ease-in-out infinite; }
     @keyframes pulse { 0%, 100% { opacity: 0.8; } 50% { opacity: 0.3; } }
 
     /* ---- Toast ---- */
@@ -592,7 +592,7 @@
     .field-footer { display: flex; justify-content: flex-end; margin-top: 3px; }
     .char-counter { font-size: 0.75rem; color: #bbb; }
     .char-counter.warn { color: #e65100; font-weight: bold; }
-    input[type="text"], textarea, select, input[type="password"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; font-size: 1rem; }
+    input[type="text"], textarea, select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; font-size: 1rem; }
     textarea { height: 120px; resize: vertical; font-family: inherit; }
     .btn-area { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 20px; }
     .btn-hint { font-size: 0.75rem; color: #bbb; margin-right: auto; }
@@ -601,7 +601,7 @@
     .btn-submit { background-color: #0056b3; color: white; }
 
     /* ---- Board status messages ---- */
-    .board-msg { color: #777; margin: 40px auto; text-align: center; width: 100%; }
+    .board-msg { grid-column: 1 / -1; color: #777; margin: 40px auto; text-align: center; width: 100%; }
     .board-msg.error { color: #e53935; }
 </style>
 </head>
@@ -750,12 +750,17 @@
 
         // ---- Save ----
         $('#btn-save').on('click', function () {
+            var $btn = $(this);
+            // Ctrl+Enter reaches this handler through jQuery's trigger(), which
+            // runs it even while the button is disabled. Without this guard a
+            // second Ctrl+Enter during the request posts the note twice.
+            if ($btn.prop('disabled')) return;
+
             var title = $.trim($('#input-title').val()),
                 body  = $.trim($('#input-body').val()),
                 color = $('#input-color').val();
             if (!title || !body) { showToast('タイトルと内容は必須です。'); return; }
 
-            var $btn = $(this);
             $btn.prop('disabled', true).text('保存中...');
             apiPost('save', { title: title, body: body, color: color })
                 .done(function (res) {
@@ -788,7 +793,12 @@
                         showToast((data && data.message) || '削除に失敗しました。');
                     }
                 })
-                .fail(function (xhr) { showToast(errorMessage(xhr, '削除に失敗しました。')); });
+                .fail(function (xhr) {
+                    showToast(errorMessage(xhr, '削除に失敗しました。'));
+                    // 404 = somebody else removed it first. Refresh so the note
+                    // disappears instead of lingering as an undeletable ghost.
+                    if (xhr && xhr.status === 404) loadNotes();
+                });
         }
 
         $(document).on('click', '.btn-delete-mine', function (e) {
@@ -817,7 +827,9 @@
         $(document).on('keydown', function (e) {
             if (e.key === 'Escape') { $('.modal-overlay:visible').hide(); }
         });
-        $('#input-body').on('keydown', function (e) {
+        // Bound on the modal rather than the textarea: the on-screen hint
+        // promises Ctrl+Enter, so it has to work from the title field too.
+        $('#modal-post').on('keydown', function (e) {
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { $('#btn-save').trigger('click'); }
         });
 
@@ -843,7 +855,10 @@
 
         // ---- Load (fetch) ----
         function loadNotes() {
-            $('#board').html('<p class="loading-msg">読み込み中...</p>');
+            // Only on the first load: blanking the board after a post or a
+            // delete makes it flash and throws the scroll position back to
+            // the top, which is jarring when tidying up several notes.
+            if (notesData.length === 0) $('#board').html('<p class="loading-msg">読み込み中...</p>');
             $.getJSON(API + '?action=load', function (data) {
                 notesData = data || [];
                 renderNotes();
@@ -905,7 +920,9 @@
                 : notesData.filter(function (n) { return n.color === activeFilter; });
 
             if (filtered.length === 0) {
-                $board.html('<p class="board-msg">現在、掲示されているものはありません。</p>');
+                $board.html(notesData.length === 0
+                    ? '<p class="board-msg">現在、掲示されているものはありません。</p>'
+                    : '<p class="board-msg">この色の付箋はありません。</p>');
                 return;
             }
 
