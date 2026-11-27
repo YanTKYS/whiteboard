@@ -43,6 +43,7 @@ Windows 認証（Active Directory）によりログインユーザーを自動�
 whiteboard/
 ├── default.aspx          # アプリ本体（サーバーサイド C# + HTML/CSS/JS を一枚に集約）
 ├── web.config            # IIS・ASP.NET 設定ファイル
+├── LICENSE               # MIT License（自作部分に適用。「ライセンス」参照）
 ├── local.config          # 環境固有設定：管理者ADグループ名（リポジトリ管理外・手動作成）
 ├── local.config.sample   # 上記のひな形
 ├── .gitignore            # data/ logs/ local.config などの誤コミット防止
@@ -68,10 +69,15 @@ IIS の仮想ディレクトリまたはサイトルートに以下を配置し�
 whiteboard/
 ├── default.aspx
 ├── web.config
+├── LICENSE                   ← ライセンス全文（配置時に同梱）
 ├── local.config              ← 手順 5 で作成
 └── common/
     └── jquery-3.6.0.min.js   ← jQuery を別途入手して配置
 ```
+
+> ファイルを IIS へコピーして運用する場合も、再配布の際は `LICENSE`（ライセンス全文）を
+> 一緒にコピーしてください。`default.aspx` / `web.config` 内の著作権表示は削除しないでください
+> （`default.aspx` では実行・表示に影響しないサーバー側コメント `<%-- --%>` で記載しています）。
 
 > `data/` `logs/` フォルダはアプリが初回アクセス時に自動作成します。  
 > IIS の実行アカウント（アプリプールのユーザー）に、アプリのルートフォルダへの **書き込み権限** が必要です
@@ -107,6 +113,9 @@ IIS マネージャーで対象サイト／アプリに対して以下を設定�
 
 [jQuery 公式サイト](https://jquery.com/) または社内ミラーから `jquery-3.6.0.min.js` を入手し、  
 `common/` フォルダに配置してください。
+
+jQuery は本リポジトリに含まれず、MIT License の対象外です（「ライセンス」参照）。
+入手したファイルの先頭にある著作権表示・ライセンス表示は削除せず、そのまま配置してください。
 
 ### 5. 管理者グループの設定
 
@@ -251,3 +260,29 @@ AD グループのメンバーを増減させるだけです。`default.aspx` �
 - 管理者判定は AD グループの所属で行います。共有パスワードを持たないため、パスワードの漏洩・使い回し・総当たりという経路自体が存在しません。権限の管理は AD 側の運用に一本化されます。
 - `data/` `logs/` および `local.config` は `.gitignore` 済みです。これらには社内ユーザー名・AD 表示名・伝言本文・AD グループ名が含まれるため、リポジトリにコミットしないでください。
 - `web.config` で `<deny users="?" />` を設定し、IIS 側の認証設定と二重に未認証アクセスを遮断しています。IIS で Windows 認証が有効になっていない場合は起動時に構成エラーとなります（フェイルクローズ）。
+
+---
+
+## ライセンス
+
+本リポジトリの自作部分は [MIT License](./LICENSE) で提供します。
+Copyright (c) 2026 YanTKYS
+
+### MIT License の対象
+
+- `default.aspx`
+- `web.config`
+- `local.config.sample`
+- `README.md`
+- `LICENSE`
+
+### MIT License の対象外
+
+| 対象 | 扱い |
+|---|---|
+| jQuery 3.6.0（`common/jquery-3.6.0.min.js`） | 本リポジトリには含まれません（`.gitignore` 済み・別途配置）。jQuery は [MIT License](https://jquery.org/license/)（Copyright OpenJS Foundation and other contributors）で提供されており、元のライセンスと著作権表示を維持します。入手したファイル先頭の表示は削除しないでください |
+| Windows 認証 / Active Directory / IIS / .NET Framework | 各提供元の製品・ライセンスに従います。本リポジトリには含まれません |
+| `local.config`（実際の設定ファイル） | 環境固有の設定で、リポジトリ管理外です。AD グループ名などを含むためコミットしないでください |
+| `data/`（投稿データ）・`logs/`（エラーログ） | 運用で生成されるデータで、MIT License の対象ではありません。ユーザー名・伝言本文などを含むため、公開・再配布しないでください |
+
+閉域ネットワーク・Windows 認証・ローカル設定・機密情報の取り扱いに関する前提は、上記の「注意事項」のとおり変わりません。

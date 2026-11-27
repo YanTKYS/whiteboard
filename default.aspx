@@ -9,6 +9,7 @@
 <%@ Import Namespace="System.Web.Configuration" %>
 <%-- Import AD library --%>
 <%@ Import Namespace="System.DirectoryServices.AccountManagement" %>
+<%-- Copyright (c) 2026 YanTKYS. Licensed under the MIT License (see LICENSE). jQuery (common/jquery-3.6.0.min.js) is not covered; it keeps its own MIT notice. --%>
 
 <script runat="server">
     // ==========================================
